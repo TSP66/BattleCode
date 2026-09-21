@@ -1,0 +1,5 @@
+# Training (bcsim/train). torch comes from the CUDA wheel index, see setup.sh.
+torch==2.11.0
+numpy==2.5.3
+# wasmprobe/ (metering and submission checks) also needs: wasmtime, and
+# unswbc installed as a uv tool (see SUBMITTING.md).
