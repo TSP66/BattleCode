@@ -1,2 +1,3 @@
 {"version": "v5", "name": "v5-v2-64x4-25M-embedded", "ckpt": "/home/thomaspetty/BattleCode/runs/submitted/v5.pt", "source": "runs/v2/snapshots/turns_25165824.pt", "time": "2026-09-21T15:40"}
 {"version": "v6", "name": "v2-turns_387710976", "ckpt": "/home/thomaspetty/BattleCode/runs/submitted/v6.pt", "source": "/home/thomaspetty/BattleCode/runs/v2/snapshots/turns_387710976.pt", "time": "2026-09-21T16:33"}
+{"version": "v7", "name": "v4-turns_400031744", "ckpt": "runs/submitted/v7.pt", "source": "/home/thomaspetty/BattleCode/runs/v4/snapshots/turns_400031744.pt", "time": "2026-09-21T19:23"}
