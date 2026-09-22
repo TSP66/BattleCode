@@ -270,6 +270,89 @@ cells; every number here is greedy play on 8 maps.
 5. Self-traps as an auxiliary *penalty* rather than a relabel, if the 8,949 rows
    are ever worth it.
 
+## 8. Deployment: the C++ submission
+
+Next step 4, done. `mybot/memory.hpp` computes `mem` and `memfar` as the bot
+plays, and `mybot/main.cpp` appends them to the 14 observation scalars, so the
+network's scalar input is 708 wide. The exporter writes that width into
+`weights_data.hpp` and the bot feeds whatever the blob asks for, so a plain
+14-scalar checkpoint (v10) still ships from the same sources unchanged.
+
+One process is one dragon -- the judge's protocol sends `ID` once and then loops
+over that dragon's turns -- so one memory per process is exactly the per-dragon
+lifetime the features were built with, and a split child starts empty because it
+is a new process. The memory is updated on every turn, including the first (where
+the bot deliberately skips the network) and any turn the budget cuts short: a gap
+would change every feature after it.
+
+| check (`wasmprobe/check_bot.sh runs/i2/ft_control/best.pt`) | result |
+|---|---|
+| zip, no data files | 2,917 KB of the 4 MB limit |
+| wasm, judge's flags, no filesystem, metered | net ran 11/11 turns, worst turn **69M of 100M** |
+| observation == simulator | 1,049 turns over 11 maps, 0 differ |
+| **remembered inputs == `MemoryTracker`** | 1,049 turns, 22 dragons, **0 differ** (max error 5e-10, the dump's print precision) |
+| forward == checkpoint | 1,027 network turns, max logit error 0.013, every argmax agrees |
+| real engine, full game | 8,232 network turns, 231 first turns, **0 fallbacks**, 0 warnings |
+
+Two checks beyond the old gate, because the memory is the new risk:
+
+- `wasmprobe/parity_mem.py` (gate step 4) replays each dump through
+  `clone_features.MemoryTracker` one turn at a time. A single-turn check cannot
+  cover a feature that depends on the whole sequence, and a drift of one cell
+  compounds for the rest of the dragon's life. It matches to the last bit.
+- the same dumps built for wasm with the judge's toolchain and flags agree with
+  the native build bit for bit on all 694 remembered inputs, and pick the same
+  action on every turn (logits within 1e-4).
+
+Cost: the remembered inputs are ~175k points a turn to build (the whole turn is
+69M), and the wider scalar branch adds ~0.3M. `HEAD_RESERVE` went from 6M to 7M
+to cover it.
+
+**Chosen for upload: `ft_control`**, the top of the round robin (0.531 +- 0.016 over six
+opponents, section 6), which is also +0.030 on the live submission v10 there.
+In the real engine, both sides of all eight live maps, the deployed bot beat a
+v10 build of itself 12-4 (0.750, 16 games, se 0.11) -- noisy, but it confirms the
+deployed path plays the policy rather than falling over.
+
+Uploaded as **v11** (submission 2498, active). The scrim that SUBMITTING.md
+step 5 asks for then found something much bigger than any model in this report:
+
+### The first-turn heuristic was trading every dragon away
+
+v11 lost its first server game **0-12 in two rounds** (battle 58343). No CPU
+overrun -- the replay's indicators say the network ran. What happened is that
+all four of our dragons split on round 1, and each child's first turn is played
+by `fallback()`, because the turn that widens 1.57M weights cannot also afford a
+forward pass. That heuristic stepped straight on without looking, entering a
+head's cell is legal, and it kills both dragons -- so each child took out an
+ally. **Six of our eight dragons, gone before round 2, in every game.**
+
+It reproduces locally in one command, and **v10 does exactly the same**, so it is
+not a regression from the features -- it has been in every submission. Local
+evaluation could not see it: `bcsim` has no first-turn fallback, so every turn of
+every round-robin game runs the network. A mirror match hides it too, because
+both sides lose the same six dragons.
+
+`fallback()` now refuses to step onto any head and prefers straight on among what
+is left. Deaths in rounds 0-3 on Default: **12 -> 0**. Against the identical
+weights with the old heuristic it scores **0.875 over 16 games** (both sides of
+the 8 live maps) -- a bigger effect than the whole spread of section 6.
+
+Uploaded as **v12**, and the server settles it: the same opponent on the same map
+that beat v11 0-12 in two rounds (battle 58343, 0.7 s) loses to v12 **109-0** over
+a full game (battle 58665, 56 s).
+
+The lesson for the next model comparison is that none of section 6's numbers can
+see a deployment-only failure: `bcsim` runs the network on every turn, and the
+judge does not. A scrim is the only thing that catches this class of bug, so it
+belongs before any conclusion about win rates, not after.
+
+Two caveats stand, unchanged from section 6. Nothing here clears the
+>0.60-against-everything bar this repo set itself for uploads. And `ft_control`
+is the round robin's pick, not the anchor field's: `mm` is the only one measured
+there (0.607, against v10's 0.577), and `ft_control` vs `mm` is a tie within
+noise (0.516 over 192 games). Swapping to `mm` is one re-export.
+
 ## Files
 
 | path | what |
@@ -281,6 +364,7 @@ cells; every number here is greedy play on 8 maps.
 | `bcsim/train/tossup.py` | toss-up detection and weights |
 | `bcsim/train/clone_eval.py`, `round_robin.py`, `clone_report.py`, `sprint_report.py`, `collect_results.py` | evaluation |
 | `bcsim/cpp/bc_vec.hpp` | `VecEnv::probe`, `free_area`, `trapped`, `last_deaths` |
+| `mybot/memory.hpp`, `wasmprobe/parity_mem.py` | the same features in the deployed bot, and the parity check |
 | `runs/i2/*/best.pt`, `log.jsonl` | the clones (`full_mem_memfar` = mm, `ft_sprint_good` = the fixed sprint variant) |
 | `runs/evals/*.jsonl`, `summary.json` | every game result quoted here |
 

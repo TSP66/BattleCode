@@ -45,7 +45,7 @@ d = json.load(sys.stdin); m = d['match']
 print(f\"battle {m['id']}: {m['status']} on {d['mapName']}, {d['teamAName']} vs {d['teamBName']}, winner {m['winner']}\")
 if m.get('log'): print('server log:', m['log'])"
 
-REPLAY="$(mktemp --suffix=.replay)"
+REPLAY="$(mktemp --suffix=.replay 2>/dev/null || echo "$(mktemp -t scrim).replay")"
 trap 'rm -f "$REPLAY"' EXIT
 curl -sL -o "$REPLAY" -H "Authorization: Bearer $KEY" "$API/battles/$ID/replay"
 python3 "$ROOT/wasmprobe/replay.py" "$REPLAY"
