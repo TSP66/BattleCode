@@ -1,0 +1,6 @@
+held-out games 120, completed after 2026-09-22T09:58Z (unseen by r3 for sure): 22
+all 1302 games after cut: 203  earliest/lates 2026-09-22T02:15:23.955Z 2026-09-22T11:10:20.608Z
+rows 165,946, novel 84.4%
+v10        all 0.8130 novel 0.8096
+mm         all 0.8557 novel 0.8461
+ft_control all 0.8567 novel 0.8445

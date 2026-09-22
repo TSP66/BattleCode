@@ -57,3 +57,13 @@ runs/critic_probe/data/
 runs/replays/*/sprint/
 runs/replays/*/selftrap/
 .DS_Store
+
+# the clones and game results behind DISTILL_DEVTEST.md
+!runs/i2/
+runs/i2/*
+!runs/i2/*/
+runs/i2/*/*
+!runs/i2/*/log.jsonl
+!runs/i2/full_mem_memfar/best.pt
+!runs/evals/
+runs/evals/*.pt

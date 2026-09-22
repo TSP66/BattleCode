@@ -21,7 +21,11 @@ then enemy length removed, then fewer steps) becomes the label.
 
 writes <games>/sprint/<game id>.npz, one row per dataset sample (same order
 as replay_dataset.py's npz): `label` (codec id or -1), `cat` (0 none,
-1 longest, 2 last) and `teacher_cat` (what the team's own move achieved).
+1 longest, 2 last), `teacher_cat` (what the team's own move achieved) and
+`survive` (1 when the labelled sprint leaves our own dragon alive: a head-on
+kill takes both, so only a trapping sprint survives - 1% of labels - and
+relabelling all of them taught the clone to trade heads), plus `our_len` and
+`foe_longest` per turn, which price the trade.
 """
 
 from __future__ import annotations
@@ -80,7 +84,7 @@ def label_game(game_json: pathlib.Path, out_dir: pathlib.Path, team_id: int) -> 
     z = lambda dt, *s: np.zeros((1,) + s, dt)
     kind, nst, dirs, split = z(np.int8), z(np.int8), z(np.int8, MAX_STEPS), z(np.int16)
     send, value = z(np.int8), z(np.uint32)
-    labels, cats, tcats = [], [], []
+    labels, cats, tcats, survives, ourlen, foelen = [], [], [], [], [], []
     probed = 0
     for i, t in enumerate(rp.turns):
         did, rnd = int(obs.dragon_id[0]), int(obs.round[0])
@@ -90,12 +94,14 @@ def label_game(game_json: pathlib.Path, out_dir: pathlib.Path, team_id: int) -> 
             sc = obs.scalar[0]
             facing = int(np.argmax(sc[SC["face_n"]:SC["face_n"] + 4]))
             a, _ = encode(t, facing, int(sc[SC["length_raw"]]))
-            lab, cat, tcat = -1, 0, 0
+            lab, cat, tcat, surv = -1, 0, 0, 0
+            olen, flen = int(sc[SC["length_raw"]]), 0
             # every turn with a legal move is probed: the team's own move is
             # scored too (teacher_cat), sprint or not
             if obs.mask[0][:N_MOVES].any():
                 probed += 1
                 before, per = env.probe(0)
+                flen = int(before[1])
                 c = categorise(before, per)
                 tcat = int(c[a]) if 0 <= a < N_MOVES else 0
                 best_single = int(c[:3].max())
@@ -105,9 +111,13 @@ def label_game(game_json: pathlib.Path, out_dir: pathlib.Path, team_id: int) -> 
                     ids = [3 + j for j in np.flatnonzero(sprint == top)]
                     key = lambda m: (-int(per[m][OUR_ALIVE]), -int(per[m][KILLED_LEN]), m)
                     lab, cat = min(ids, key=key), top
+                    surv = int(per[lab][OUR_ALIVE])
             labels.append(lab)
             cats.append(cat)
             tcats.append(tcat)
+            survives.append(surv)
+            ourlen.append(olen)
+            foelen.append(flen)
         kind[0] = t.kind if t.kind >= 0 else 2
         nst[0] = len(t.dirs)
         dirs[0] = 0
@@ -119,11 +129,15 @@ def label_game(game_json: pathlib.Path, out_dir: pathlib.Path, team_id: int) -> 
     env.close()
     cats_a = np.array(cats, np.int8)
     np.savez_compressed(out_dir / f"{gid}.npz", label=np.array(labels, np.int16), cat=cats_a,
-                        teacher_cat=np.array(tcats, np.int8))
+                        teacher_cat=np.array(tcats, np.int8),
+                        survive=np.array(survives, np.int8),
+                        our_len=np.array(ourlen, np.int16),
+                        foe_longest=np.array(foelen, np.int16))
     return {"game": gid, "samples": len(labels), "probed": probed,
             "last": int((cats_a == 2).sum()), "longest": int((cats_a == 1).sum()),
             "teacher_last": int((np.array(tcats) == 2).sum()),
-            "teacher_longest": int((np.array(tcats) == 1).sum())}
+            "teacher_longest": int((np.array(tcats) == 1).sum()),
+            "survive": int(np.sum(survives))}
 
 
 def _job(args):

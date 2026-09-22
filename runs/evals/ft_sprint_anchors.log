@@ -1,0 +1,42 @@
+  74/480 games done, 300s
+  111/480 games done, 600s
+  154/480 games done, 901s
+  178/480 games done, 1201s
+  199/480 games done, 1501s
+  212/480 games done, 1801s
+  231/480 games done, 2101s
+  238/480 games done, 2402s
+  243/480 games done, 2702s
+  250/480 games done, 3002s
+  259/480 games done, 3302s
+  270/480 games done, 3603s
+  273/480 games done, 3903s
+  276/480 games done, 4203s
+  280/480 games done, 4503s
+  288/480 games done, 4803s
+  292/480 games done, 5103s
+  299/480 games done, 5403s
+  305/480 games done, 5703s
+  317/480 games done, 6003s
+  331/480 games done, 6304s
+  351/480 games done, 6604s
+  358/480 games done, 6904s
+  361/480 games done, 7204s
+  362/480 games done, 7504s
+  364/480 games done, 7804s
+  365/480 games done, 8104s
+  367/480 games done, 8404s
+  370/480 games done, 8704s
+  375/480 games done, 9004s
+  377/480 games done, 9305s
+  381/480 games done, 9605s
+  385/480 games done, 9905s
+  387/480 games done, 10205s
+  393/480 games done, 10505s
+  eval hit its 10800s limit, 82 envs short
+sss_r3_bc_64x4                   n   75  score 0.420  win 0.400  draw 0.040
+vibing_r4_bc_64x4                n   84  score 0.684  win 0.679  draw 0.012
+shink_r1_bc_64x4                 n   87  score 0.488  win 0.471  draw 0.035
+sabotage_bc_64x4                 n   76  score 0.546  win 0.513  draw 0.066
+turns_112721920                  n   76  score 0.421  win 0.395  draw 0.053
+10800s

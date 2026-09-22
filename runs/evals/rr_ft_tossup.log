@@ -1,0 +1,27 @@
+  126/384 games done, 300s
+  198/384 games done, 600s
+  218/384 games done, 900s
+  236/384 games done, 1200s
+  278/384 games done, 1500s
+  289/384 games done, 1800s
+  289/384 games done, 2100s
+  290/384 games done, 2400s
+  300/384 games done, 2700s
+  313/384 games done, 3000s
+  335/384 games done, 3300s
+  336/384 games done, 3600s
+  336/384 games done, 3901s
+  336/384 games done, 4201s
+  338/384 games done, 4501s
+ft_tossup vs ['ft_sprint', 'ft_control', 'mm', 'v10']: ft_sprint 0.542  ft_control 0.479  mm 0.469  v10 0.568  (4786s)
+/Users/thomaspetty/Documents/BattleCode/bcsim/train/round_robin.py:54: RuntimeWarning: Mean of empty slice
+  print(f"{x:<{w}s}{cells}  {np.nanmean(np.delete(m[i], i)):9.3f}")
+              full_base    ft_aggr  ft_tossup  ft_sprint ft_control         mm        v10       mean
+full_base             -          .          .          .          .          .          .        nan
+ft_aggr               .          -          .          .          .          .          .        nan
+ft_tossup             .          .          -      0.542      0.479      0.469      0.568      0.514
+ft_sprint             .          .      0.458          -          .          .          .      0.458
+ft_control            .          .      0.521          .          -          .          .      0.521
+mm                    .          .      0.531          .          .          -      0.458      0.495
+v10                   .          .      0.432          .          .      0.542          -      0.487
+games per pair: [96]

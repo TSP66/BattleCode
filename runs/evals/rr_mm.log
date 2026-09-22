@@ -1,0 +1,15 @@
+  63/96 games done, 300s
+  72/96 games done, 600s
+  84/96 games done, 900s
+mm vs ['v10']: v10 0.458  (1149s)
+/Users/thomaspetty/Documents/BattleCode/bcsim/train/round_robin.py:54: RuntimeWarning: Mean of empty slice
+  print(f"{x:<{w}s}{cells}  {np.nanmean(np.delete(m[i], i)):9.3f}")
+              full_base    ft_aggr  ft_tossup  ft_sprint ft_control         mm        v10       mean
+full_base             -          .          .          .          .          .          .        nan
+ft_aggr               .          -          .          .          .          .          .        nan
+ft_tossup             .          .          -          .          .          .          .        nan
+ft_sprint             .          .          .          -          .          .          .        nan
+ft_control            .          .          .          .          -          .          .        nan
+mm                    .          .          .          .          .          -      0.458      0.458
+v10                   .          .          .          .          .      0.542          -      0.542
+games per pair: [96]

@@ -1,0 +1,42 @@
+  77/480 games done, 300s
+  101/480 games done, 600s
+  130/480 games done, 901s
+  168/480 games done, 1201s
+  189/480 games done, 1501s
+  209/480 games done, 1801s
+  226/480 games done, 2101s
+  237/480 games done, 2401s
+  246/480 games done, 2701s
+  257/480 games done, 3001s
+  261/480 games done, 3301s
+  268/480 games done, 3602s
+  270/480 games done, 3902s
+  274/480 games done, 4202s
+  283/480 games done, 4502s
+  291/480 games done, 4802s
+  304/480 games done, 5102s
+  321/480 games done, 5402s
+  338/480 games done, 5702s
+  354/480 games done, 6002s
+  359/480 games done, 6302s
+  360/480 games done, 6603s
+  360/480 games done, 6903s
+  360/480 games done, 7203s
+  360/480 games done, 7503s
+  360/480 games done, 7803s
+  361/480 games done, 8103s
+  370/480 games done, 8403s
+  376/480 games done, 8703s
+  378/480 games done, 9003s
+  387/480 games done, 9304s
+  eval hit its 9500s limit, 86 envs short
+ft_aggr vs ['ft_tossup', 'ft_sprint', 'ft_control', 'mm', 'v10']: ft_tossup 0.487  ft_sprint 0.481  ft_control 0.487  mm 0.449  v10 0.426  (9501s)
+              full_base    ft_aggr  ft_tossup  ft_sprint ft_control         mm        v10       mean     se
+full_base             -          .          .          .          .          .          .        nan    nan
+ft_aggr               .          -      0.487      0.481      0.487      0.449      0.426      0.466  0.025
+ft_tossup             .      0.513          -          .          .          .          .      0.513  0.057
+ft_sprint             .      0.519          .          -          .          .          .      0.519  0.056
+ft_control            .      0.513          .          .          -          .          .      0.513  0.056
+mm                    .      0.551          .          .          .          -          .      0.551  0.056
+v10                   .      0.574          .          .          .          .          -      0.574  0.055
+games per pair: [77, 78, 79, 81]

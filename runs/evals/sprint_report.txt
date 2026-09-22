@@ -1,0 +1,9 @@
+../runs/i2/full_mem_memfar/best.pt
+  super-sprint rows 1076: exact 0.012, any sprint 0.030 (last-dragon 0.022, longest 0.032)
+  other rows 300,000: sprints 0.0022 (team sprinted 0.0028), agreement 0.8517
+../runs/i2/ft_control/best.pt
+  super-sprint rows 1076: exact 0.020, any sprint 0.035 (last-dragon 0.035, longest 0.036)
+  other rows 300,000: sprints 0.0024 (team sprinted 0.0028), agreement 0.8538
+../runs/i2/ft_sprint/best.pt
+  super-sprint rows 1076: exact 0.417, any sprint 0.428 (last-dragon 0.485, longest 0.413)
+  other rows 300,000: sprints 0.0042 (team sprinted 0.0028), agreement 0.8513

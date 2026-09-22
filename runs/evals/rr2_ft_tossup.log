@@ -1,0 +1,52 @@
+  62/384 games done, 300s
+  94/384 games done, 600s
+  126/384 games done, 901s
+  144/384 games done, 1201s
+  162/384 games done, 1501s
+  175/384 games done, 1801s
+  192/384 games done, 2101s
+  201/384 games done, 2401s
+  211/384 games done, 2701s
+  220/384 games done, 3001s
+  224/384 games done, 3301s
+  228/384 games done, 3602s
+  234/384 games done, 3902s
+  237/384 games done, 4202s
+  243/384 games done, 4502s
+  253/384 games done, 4802s
+  262/384 games done, 5102s
+  272/384 games done, 5402s
+  283/384 games done, 5702s
+  289/384 games done, 6002s
+  289/384 games done, 6302s
+  289/384 games done, 6603s
+  289/384 games done, 6903s
+  289/384 games done, 7203s
+  292/384 games done, 7503s
+  295/384 games done, 7803s
+  297/384 games done, 8103s
+  302/384 games done, 8403s
+  310/384 games done, 8703s
+  319/384 games done, 9003s
+  327/384 games done, 9303s
+  333/384 games done, 9604s
+  336/384 games done, 9904s
+  336/384 games done, 10204s
+  336/384 games done, 10504s
+  336/384 games done, 10804s
+  336/384 games done, 11104s
+  336/384 games done, 11404s
+  336/384 games done, 11704s
+  361/384 games done, 12004s
+ft_tossup vs ['ft_sprint', 'ft_control', 'mm', 'v10']: ft_sprint 0.495  ft_control 0.552  mm 0.510  v10 0.604  (12247s)
+/Users/thomaspetty/Documents/BattleCode/bcsim/train/round_robin.py:54: RuntimeWarning: Mean of empty slice
+  print(f"{x:<{w}s}{cells}  {np.nanmean(np.delete(m[i], i)):9.3f}")
+              full_base    ft_aggr  ft_tossup  ft_sprint ft_control         mm        v10       mean
+full_base             -          .          .          .          .          .          .        nan
+ft_aggr               .          -          .          .          .          .          .        nan
+ft_tossup             .          .          -      0.495      0.552      0.510      0.604      0.540
+ft_sprint             .          .      0.505          -          .          .          .      0.505
+ft_control            .          .      0.448          .          -          .          .      0.448
+mm                    .          .      0.490          .          .          -          .      0.490
+v10                   .          .      0.396          .          .          .          -      0.396
+games per pair: [96]

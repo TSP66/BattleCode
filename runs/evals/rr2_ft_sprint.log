@@ -1,0 +1,45 @@
+  60/288 games done, 300s
+  96/288 games done, 600s
+  118/288 games done, 900s
+  140/288 games done, 1200s
+  151/288 games done, 1501s
+  158/288 games done, 1801s
+  165/288 games done, 2101s
+  174/288 games done, 2401s
+  176/288 games done, 2701s
+  178/288 games done, 3001s
+  186/288 games done, 3301s
+  195/288 games done, 3601s
+  202/288 games done, 3901s
+  209/288 games done, 4201s
+  216/288 games done, 4502s
+  219/288 games done, 4802s
+  219/288 games done, 5102s
+  219/288 games done, 5402s
+  219/288 games done, 5702s
+  219/288 games done, 6002s
+  221/288 games done, 6302s
+  226/288 games done, 6602s
+  229/288 games done, 6902s
+  235/288 games done, 7202s
+  242/288 games done, 7502s
+  252/288 games done, 7802s
+  252/288 games done, 8103s
+  252/288 games done, 8403s
+  252/288 games done, 8703s
+  252/288 games done, 9003s
+  252/288 games done, 9303s
+  252/288 games done, 9603s
+  262/288 games done, 9903s
+ft_sprint vs ['ft_control', 'mm', 'v10']: ft_control 0.411  mm 0.484  v10 0.542  (10144s)
+/Users/thomaspetty/Documents/BattleCode/bcsim/train/round_robin.py:54: RuntimeWarning: Mean of empty slice
+  print(f"{x:<{w}s}{cells}  {np.nanmean(np.delete(m[i], i)):9.3f}")
+              full_base    ft_aggr  ft_tossup  ft_sprint ft_control         mm        v10       mean
+full_base             -          .          .          .          .          .          .        nan
+ft_aggr               .          -          .          .          .          .          .        nan
+ft_tossup             .          .          -          .          .          .          .        nan
+ft_sprint             .          .          .          -      0.411      0.484      0.542      0.479
+ft_control            .          .          .      0.589          -          .          .      0.589
+mm                    .          .          .      0.516          .          -          .      0.516
+v10                   .          .          .      0.458          .          .          -      0.458
+games per pair: [96]
