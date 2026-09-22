@@ -10,6 +10,7 @@
 //   * the first few turns report where the points actually went, which is how
 //     the architecture gets sized against measurement rather than guesswork.
 #include "helper.hpp"
+#include "memory.hpp"
 #include "net.hpp"
 #include "obs.hpp"
 #include "weights_data.hpp"
@@ -26,8 +27,10 @@ constexpr std::int64_t TURN_BUDGET = 100'000'000;
 // what must stay unspent: one metered write (2.5M + 4000/byte) plus room for
 // the tail of the turn
 constexpr std::int64_t RESERVE = 12'000'000;
-// the 1x1 projection, the scalar branch and the two fused layers
-constexpr std::int64_t HEAD_RESERVE = 6'000'000;
+// the 1x1 projection, the scalar branch and the two fused layers. The scalar
+// branch is 708 inputs wide with the remembered features, not 14, which is
+// ~0.3M more points.
+constexpr std::int64_t HEAD_RESERVE = 7'000'000;
 constexpr int LOG_UNTIL_ROUND = 3;
 
 std::int64_t points_now() {
@@ -38,6 +41,11 @@ std::int64_t points_now() {
 net::Weights W;
 bool have_net = false;
 char const* net_status = "not loaded";
+
+// One process is one dragon (helper.hpp reads its ID once, then loops over its
+// turns), so one memory serves the whole life of this dragon and no other.
+memory::Memory MEM;
+float scalars[memory::N_SCALARS_IN];
 
 std::vector<float> buf_local, buf_x, buf_y, buf_z, buf_col, buf_pad, buf_flat;
 std::vector<float> buf_sc, buf_h, buf_fuse;
@@ -71,7 +79,7 @@ void bind_layers() {
     L.flat_c = W.take((std::size_t)W.head * w);
     L.flat_nw = W.take((std::size_t)W.head);
     L.flat_nb = W.take((std::size_t)W.head);
-    L.sc0w = W.take(128 * obs::N_SCALARS);
+    L.sc0w = W.take((std::size_t)128 * (std::size_t)W.scalars);
     L.sc0b = W.take(128);
     L.sc2w = W.take(128 * 128);
     L.sc2b = W.take(128);
@@ -98,8 +106,7 @@ void bind_layers() {
 
 // Runs the policy. Returns false when the budget ran out mid-trunk, in which
 // case `logits` is meaningless and the caller falls back.
-bool forward(obs::Snapshot const& snap, unswbc::Controller const& ct,
-             unswbc::Game const& game, std::int64_t start, std::int64_t* stage_cost) {
+bool forward(obs::Snapshot const& snap, std::int64_t start, std::int64_t* stage_cost) {
     int const w = W.width;
 
     snap.local(buf_local.data());
@@ -157,9 +164,7 @@ bool forward(obs::Snapshot const& snap, unswbc::Controller const& ct,
                     buf_flat.data() + (std::size_t)c * net::PITCH,
                     sizeof(float) * obs::CELLS);
 
-    float scalars[obs::N_SCALARS];
-    snap.scalars(ct, game, scalars);
-    net::linear(L.sc0w, L.sc0b, scalars, buf_sc.data(), 128, obs::N_SCALARS);
+    net::linear(L.sc0w, L.sc0b, scalars, buf_sc.data(), 128, W.scalars);
     net::apply_silu(buf_sc.data(), 128);
     net::linear(L.sc2w, L.sc2b, buf_sc.data(), buf_sc.data() + 128, 128, 128);
     net::apply_silu(buf_sc.data() + 128, 128);
@@ -237,7 +242,8 @@ void flush_turn() {
 bool load_weights() {
     if (!net::load_embedded(embedded::HI, embedded::LO, embedded::COUNT, embedded::CHECKSUM,
                             embedded::WIDTH, embedded::BLOCKS, embedded::HIDDEN,
-                            embedded::HEAD, W, &net_status))
+                            embedded::HEAD, embedded::SCALARS, memory::N_SCALARS_IN,
+                            W, &net_status))
         return false;
     bind_layers();
     // every parameter bound exactly once, or the layout disagrees with the
@@ -255,6 +261,7 @@ int main() {
     std::setvbuf(stdout, stdout_buf, _IOFBF, sizeof(stdout_buf));
     auto [ct, game] = unswbc::init();
     have_net = load_weights();
+    MEM.init(game.width, game.height);
 
     obs::Snapshot snap;
     bool first = true;
@@ -263,6 +270,14 @@ int main() {
         std::int64_t const start = points_now();
         snap.build(ct, game);
         snap.mask(ct, game, mask);
+        // The memory is updated on every turn, including the first and any
+        // turn the network does not get to run on: a gap in it would change
+        // every feature after it. Building the scalars here rather than inside
+        // forward() keeps that order -- observe this turn, then read it back --
+        // the one clone_features.py used.
+        MEM.observe(snap, game.round_num);
+        snap.scalars(ct, game, scalars);
+        MEM.features(snap, game.round_num, scalars + obs::N_SCALARS);
         std::int64_t const t_obs = points_now() - start;
 
         int action = -1;
@@ -271,7 +286,7 @@ int main() {
         // the first turn already paid to widen ~1.9M weights, so skip the
         // network rather than risk stacking a full forward pass on top
         if (have_net && !first) {
-            ran = forward(snap, ct, game, start, stage);
+            ran = forward(snap, start, stage);
             if (ran) {
                 float best = -1e30f;
                 for (int i = 0; i < obs::N_ACTIONS; i++)
@@ -285,11 +300,11 @@ int main() {
         {
             std::vector<float> loc((std::size_t)obs::N_CHANNELS * obs::CELLS);
             snap.local(loc.data());
-            float sc[obs::N_SCALARS];
-            snap.scalars(ct, game, sc);
             std::fprintf(stderr, "DUMP %d %d", ran ? 1 : 0, action);
             for (float v : loc) std::fprintf(stderr, " %.6g", v);
-            for (float v : sc) std::fprintf(stderr, " %.6g", v);
+            // every scalar the bot can feed, the remembered ones included, so
+            // the parity checks see exactly what the network was given
+            for (float v : scalars) std::fprintf(stderr, " %.9g", v);
             for (int i = 0; i < obs::N_ACTIONS; i++) std::fprintf(stderr, " %d", (int)mask[i]);
             for (int i = 0; i < obs::N_ACTIONS; i++) std::fprintf(stderr, " %.6g", ran ? logits[i] : 0.0f);
             std::fprintf(stderr, "\n");

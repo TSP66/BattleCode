@@ -79,11 +79,15 @@ def main() -> None:
                     for l in res.stderr.decode().splitlines() if l.startswith("DUMP")]
             n = min(len(rows), len(want))
             errs = []
+            # the bot dumps the simulator's scalars first, then whatever
+            # remembered inputs the network wants (wasmprobe/parity_mem.py
+            # checks those); only the first S are the simulator's to compare
+            extra = len(rows[0]) - (2 + C * 49 + S + 2 * A) if rows else 0
             for t in range(n):
                 r = rows[t]
                 loc = r[2:2 + C * 49].reshape(C, 7, 7)
                 sc = r[2 + C * 49:2 + C * 49 + S]
-                mask = r[2 + C * 49 + S:2 + C * 49 + S + A]
+                mask = r[2 + C * 49 + S + extra:2 + C * 49 + S + extra + A]
                 wl, ws, wm = want[t]
                 dl = np.abs(loc - wl) > 1e-4
                 # self_index / self_tail beyond a gap where the body leaves the

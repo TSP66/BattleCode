@@ -67,7 +67,7 @@ def checksum(u: np.ndarray) -> int:
 
 
 def write_header(dest: pathlib.Path, u: np.ndarray, width: int, blocks: int, hidden: int,
-                 head: int, source: str) -> None:
+                 head: int, scalars: int, source: str) -> None:
     safe = [chr(c) if 32 <= c < 127 and chr(c) not in '"\\?' else "\\%03o" % c
             for c in range(256)]
 
@@ -88,6 +88,7 @@ def write_header(dest: pathlib.Path, u: np.ndarray, width: int, blocks: int, hid
         f"constexpr int BLOCKS = {blocks};\n"
         f"constexpr int HIDDEN = {hidden};\n"
         f"constexpr int HEAD = {head};\n"
+        f"constexpr int SCALARS = {scalars};   // 14, or 708 with the remembered inputs\n"
         f"constexpr std::uint32_t COUNT = {u.size}u;       // bf16 values\n"
         f"constexpr std::uint32_t CHECKSUM = {checksum(u)}u;   // FNV-1a over them\n"
         f'constexpr char const SOURCE[] = "{source}";\n\n'
@@ -139,20 +140,26 @@ def main() -> None:
     flat = np.concatenate(tensors)
     hidden = st["fuse.0.weight"].shape[0]
     head = st["flat.0.weight"].shape[0]
+    # the scalar branch's input width: 14 for the plain observation, or 708 for
+    # a clone trained with the remembered map (imitate2.py --features mem,memfar),
+    # which mybot/memory.hpp computes as it plays
+    scalars = st["scalar.0.weight"].shape[1]
+    feats = ck.get("features") or []
     u = bf16(flat)
     if args.out:
         header = struct.pack("<6i", MAGIC, width, blocks, hidden, head, flat.size)
         pathlib.Path(args.out).write_bytes(header + u.tobytes())
         print(f"wrote {args.out}")
     dest = pathlib.Path(args.header)
-    write_header(dest, u, width, blocks, hidden, head,
+    write_header(dest, u, width, blocks, hidden, head, scalars,
                  f"{pathlib.Path(args.ckpt).name} iter {ck['iter']}")
 
     macs = (49 * 23 * width * 9 + blocks * 2 * 49 * width * width * 9
-            + 49 * width * head + 14 * 128 + 128 * 128
+            + 49 * width * head + scalars * 128 + 128 * 128
             + (49 * head + 128) * hidden + hidden * hidden + hidden * 48)
     print(f"teacher iter {ck['iter']}: width {width}, blocks {blocks} "
-          f"(checkpoint has {cfg['blocks']})")
+          f"(checkpoint has {cfg['blocks']}), {scalars} scalars"
+          + (f", features {','.join(feats)}" if feats else ""))
     print(f"{flat.size:,} params, header {dest.stat().st_size/1e6:.2f} MB")
     print(f"{macs:,} MACs -> {macs*2.0/1e6:.0f}M points at 2/MAC, "
           f"{macs*3.0/1e6:.0f}M at 3/MAC")

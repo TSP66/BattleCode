@@ -64,7 +64,8 @@ side (team A/B) bias in the eval setup or the maps.
 
 - `wasmprobe/check_bot.sh <ckpt>`: the pre-upload gate. It checks zip size, a
   no-filesystem wasm run under the judge's metering, observation parity with
-  the simulator, forward parity with the checkpoint, and a full real-engine
-  game.
+  the simulator, parity of the remembered inputs (`mem`, `memfar`) with
+  `clone_features.MemoryTracker`, forward parity with the checkpoint, and a
+  full real-engine game.
 - `bcsim/tests/test_vecenv.py [maps_dir]`: simulator vs engine, turn by turn;
   also run on the augmented maps.

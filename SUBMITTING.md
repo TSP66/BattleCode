@@ -1,6 +1,6 @@
 # Submitting a bot
 
-Submissions are **C++ only**. The bot is `mybot/` (`main.cpp`, `obs.hpp`, `net.hpp`, `helper.hpp`, `weights_data.hpp`).
+Submissions are **C++ only**. The bot is `mybot/` (`main.cpp`, `obs.hpp`, `memory.hpp`, `net.hpp`, `helper.hpp`, `weights_data.hpp`).
 Every step runs from the repo root. `wasmprobe/submit.sh` wraps steps 1-4 with the full `check_bot.sh` gate — prefer it.
 
 ## 1. Export the weights
@@ -9,8 +9,16 @@ Every step runs from the repo root. `wasmprobe/submit.sh` wraps steps 1-4 with t
 cd bcsim && ../.venv-train/bin/python -m train.export_cpp --ckpt ../runs/v1/latest.pt && cd ..
 ```
 
-Writes `mybot/weights_data.hpp` (compiled in: the judge has no filesystem) and prints the parameter count and MACs.
+Writes `mybot/weights_data.hpp` (compiled in: the judge has no filesystem) and prints the parameter count, the
+scalar count and MACs.
 The checkpoint must be `train.net.ActorCritic`, because that's the only architecture `net.hpp` runs.
+
+A clone trained with the remembered features (`train.imitate2 --features mem,memfar`, see `DISTILL_DEVTEST.md`)
+wants **708** scalars, not 14: the window's 14 plus `mem` (676) and `memfar` (18), which `mybot/memory.hpp`
+computes as it plays, one memory per dragon process. The exporter writes that count into the header and the bot
+feeds exactly as many as the blob asks for, so plain 14-scalar checkpoints still ship unchanged. What the bot
+remembers has to equal `clone_features.MemoryTracker` exactly, because that is the tracker the checkpoint's win
+rates were measured through -- `check_bot.sh` step 4 is that check, and it compares to the last bit.
 `--blocks N` ships only the first N residual blocks. It's a stopgap that damages the policy, so train at a size that fits instead.
 
 ## 2. Check that it plays
