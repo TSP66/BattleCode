@@ -115,6 +115,44 @@ inline void VecEnv::observe(Env& e, int index) {
     for (int i = 0; i < MAX_MSGS; i++)
         msgs[i] = i < (int)d.inbox.size() ? d.inbox[i] : 0u;
 
+    if (b_priv_) {
+        // what decides the game, which the 7x7 window cannot show: both
+        // teams' size, their longest dragon and how many units each has
+        int tl, tm, tu, fl, fm, fu;
+        team_stats(e, d.team, tl, tm, tu);
+        team_stats(e, (uint8_t)(1 - d.team), fl, fm, fu);
+        float* pv = b_priv_ + (size_t)index * PRIV_COUNT;
+        pv[0] = std::log1p((float)tl) / 5.0f;
+        pv[1] = std::log1p((float)tm) / 5.0f;
+        pv[2] = (float)tu / (float)m.unit_limit;
+        pv[3] = std::log1p((float)fl) / 5.0f;
+        pv[4] = std::log1p((float)fm) / 5.0f;
+        pv[5] = (float)fu / (float)m.unit_limit;
+        pv[6] = (float)g.round / (float)cfg_.max_rounds;
+        pv[7] = std::tanh((float)(tm - fm) / 10.0f);
+    }
+
+    if (b_board_) {
+        const size_t plane = (size_t)BOARD_MAX * BOARD_MAX;
+        uint8_t* bd = b_board_ + (size_t)index * BOARD_CH * plane;
+        memset(bd, 0, BOARD_CH * plane);
+        for (int y = 0; y < m.h && y < BOARD_MAX; y++)
+            for (int x = 0; x < m.w && x < BOARD_MAX; x++) {
+                const int t = m.idx(x, y);
+                const size_t at = (size_t)y * BOARD_MAX + x;
+                const int16_t occ = g.owner[t];
+                if (occ >= 0) {
+                    const bool own = g.dragons[occ].team == d.team;
+                    const bool head = g.head_at[t] != 0;
+                    bd[(own ? (head ? 1 : 0) : (head ? 3 : 2)) * plane + at] = 1;
+                }
+                bd[4 * plane + at] = g.pearl[t];
+                bd[5 * plane + at] = 1;
+                bd[6 * plane + at] = m.h_kind[t] == EDGE_KELP;
+                bd[7 * plane + at] = m.v_kind[t] == EDGE_KELP;
+            }
+    }
+
     b_uid_[index] = (int64_t)e.agents[di].uid;
     b_dragon_[index] = d.id;
     b_team_[index] = (int8_t)d.team;

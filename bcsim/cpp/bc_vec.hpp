@@ -11,6 +11,7 @@
 #include "bc_bots.hpp"
 
 #include <atomic>
+#include <cmath>
 #include <functional>
 #include <condition_variable>
 #include <mutex>
@@ -49,11 +50,32 @@ enum RewardComp {
     RW_SPLITS,                                   // one per split performed
     RW_TEAM_LEN, RW_TEAM_MAX, RW_FOE_LEN, RW_FOE_MAX,
     RW_PORTAL,                                   // 1 when this turn went through a portal
+    // reward v6: 1 to each dragon that dies on the turn its team is wiped out,
+    // when the game then goes to the enemy (not a mutual wipe-out, a draw).
+    // The result used to be paid only to survivors, so an elimination cost
+    // nothing on the result.
+    RW_ELIMINATED,
+    // reward v6: team potentials over log(1 + living units), concave so a few
+    // units are worth having and many are not
+    RW_TEAM_UNITS, RW_FOE_UNITS,
     RW_COUNT
 };
 
 constexpr int MAX_MSGS = 4;
-constexpr int MAX_STEPS = 8;      // steps a single MOVE action may carry
+// privileged critic features: our total / longest / units, theirs, round,
+// and the longest-dragon margin (see VecEnv::observe)
+constexpr int PRIV_COUNT = 8;
+// board planes: own body, own heads, enemy body, enemy heads, pearls,
+// inside-the-map, kelp on the north edge, kelp on the west edge
+constexpr int BOARD_CH = 8;
+constexpr int BOARD_MAX = 64;
+// Steps a single MOVE action may carry. The engine has no cap of its own (a
+// sprint is limited by length), so replaying real games needs more:
+// libbcvec_replay.so is built with -DBC_MAX_STEPS=64.
+#ifndef BC_MAX_STEPS
+#define BC_MAX_STEPS 8
+#endif
+constexpr int MAX_STEPS = BC_MAX_STEPS;
 constexpr int CODEC_MOVES = 3 + 9 + 27;   // relative paths of length 1, 2, 3
 constexpr int CODEC_SPLITS = 9;
 constexpr int CODEC_ACTIONS = CODEC_MOVES + CODEC_SPLITS;
@@ -95,6 +117,7 @@ struct AgentAcc {
     int last_len = 0;
     // the team picture as this agent last saw it, for the team potentials
     int team_len = 0, team_max = 0, foe_len = 0, foe_max = 0;
+    int team_units = 0, foe_units = 0;
     bool primed = false;    // false until the agent has taken one turn
     uint64_t banked_at = ~0ull;   // env turn the potentials were last banked on
 };
@@ -199,6 +222,15 @@ public:
         b_local_ = local; b_scalar_ = scalar; b_msgs_ = msgs; b_mask_ = mask;
         b_uid_ = uid; b_dragon_ = dragon_id; b_team_ = team; b_round_ = round_out;
     }
+
+    // Optional: privileged global features per row (PRIV_COUNT floats), for a
+    // critic that never ships. Nothing is written unless this is bound.
+    void bind_priv(float* priv) { b_priv_ = priv; }
+    // Optional: the whole board, BOARD_CH planes of BOARD_MAX x BOARD_MAX
+    // (uint8, map in the top-left corner, the rest zero), relative to the
+    // acting dragon's team. For offline critic studies; costs a full write
+    // per step, so leave it unbound in training.
+    void bind_board(uint8_t* board) { b_board_ = board; }
 
     void reset() {
         closures_.clear();
@@ -353,15 +385,19 @@ private:
         e.cursor = di + 1;
     }
 
-    static void team_stats(const Env& e, uint8_t team, int& total, int& longest) {
+    static void team_stats(const Env& e, uint8_t team, int& total, int& longest, int& units) {
         total = 0;
         longest = 0;
+        units = 0;
         for (const Dragon& d : e.game.dragons) {
             if (!d.alive || d.team != team) continue;
             total += d.len;
             if (d.len > longest) longest = d.len;
+            units++;
         }
     }
+
+    static float units_phi(int units) { return std::log1p((float)units); }
 
     // Pays an agent the change in the team potentials since its own last turn.
     // Because it is a difference of a state function it telescopes, so the
@@ -375,9 +411,9 @@ private:
         if (acc.banked_at == e.turn) return;
         acc.banked_at = e.turn;
         const uint8_t team = e.game.dragons[agent].team;
-        int tl, tm, fl, fm;
-        team_stats(e, team, tl, tm);
-        team_stats(e, (uint8_t)(1 - team), fl, fm);
+        int tl, tm, tu, fl, fm, fu;
+        team_stats(e, team, tl, tm, tu);
+        team_stats(e, (uint8_t)(1 - team), fl, fm, fu);
         if (acc.primed) {
             // gamma * phi(now) - phi(then). phi is never zeroed at a death: a
             // dead dragon keeps the team position it left behind, which is how
@@ -387,11 +423,15 @@ private:
             acc.comps[RW_TEAM_MAX] += g * (float)tm - (float)acc.team_max;
             acc.comps[RW_FOE_LEN] += g * (float)fl - (float)acc.foe_len;
             acc.comps[RW_FOE_MAX] += g * (float)fm - (float)acc.foe_max;
+            acc.comps[RW_TEAM_UNITS] += g * units_phi(tu) - units_phi(acc.team_units);
+            acc.comps[RW_FOE_UNITS] += g * units_phi(fu) - units_phi(acc.foe_units);
         }
         acc.team_len = tl;
         acc.team_max = tm;
         acc.foe_len = fl;
         acc.foe_max = fm;
+        acc.team_units = tu;
+        acc.foe_units = fu;
         acc.primed = true;
     }
 
@@ -464,6 +504,11 @@ private:
             const int victim = find_index(e, ev.a);
             if (victim < 0 || !e.agents[victim].open) continue;
             add_team_delta(e, victim);   // credit what it died for
+            // A wipe-out ends the game with this round, but the result is only
+            // settled when the round does: the enemy can still be wiped out
+            // later in it, which is a draw. Hold the transition open so
+            // finish_episode can pay what it turns out to be.
+            if (e.game.alive[e.game.dragons[victim].team] == 0) continue;
             close(e, index, victim, 1, out);
         }
     }
@@ -547,17 +592,19 @@ private:
                              (int)acc.primed, acc.comps[RW_DIED], acc.comps[RW_KILLS]);
 #endif
             if (!acc.open) continue;
-            add_team_delta(e, (int)i);
             const Dragon& d = e.game.dragons[i];
+            // the dead banked their potentials when they died
+            if (d.alive) add_team_delta(e, (int)i);
             if (d.alive) {
                 acc.comps[RW_FINAL_LENGTH] += (float)d.len;
                 if (winner < 0) acc.comps[RW_DRAW] += 1.0f;
                 else if (winner == (int)d.team) acc.comps[RW_WIN] += 1.0f;
                 else acc.comps[RW_LOSE] += 1.0f;
             } else {
+                // held open by harvest: it died in the round its team was
+                // wiped out, so the game is a draw or an elimination
                 if (winner < 0) acc.comps[RW_DRAW] += 1.0f;
-                else if (winner == (int)d.team) acc.comps[RW_WIN] += 1.0f;
-                else acc.comps[RW_LOSE] += 1.0f;
+                else acc.comps[RW_ELIMINATED] += 1.0f;
             }
             if (out) close(e, index, (int)i, 1, *out);
             else acc.open = false;
@@ -655,6 +702,8 @@ private:
     std::vector<double> map_cdf_;
     static thread_local std::vector<Closure> scratch_;
 
+    float* b_priv_ = nullptr;
+    uint8_t* b_board_ = nullptr;
     float* b_local_ = nullptr;
     float* b_scalar_ = nullptr;
     uint32_t* b_msgs_ = nullptr;

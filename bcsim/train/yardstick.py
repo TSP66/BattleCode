@@ -46,7 +46,8 @@ def load_net(path: str | pathlib.Path, dev: torch.device) -> tuple[ActorCritic, 
     ck = torch.load(path, map_location=dev, weights_only=False)
     a = ck["args"]
     net = ActorCritic(bcsim.N_CHANNELS, bcsim.N_SCALARS, bcsim.N_ACTIONS,
-                      width=a["width"], blocks=a["blocks"]).to(dev)
+                      width=a["width"], blocks=a["blocks"],
+                      hidden=next(v for k, v in ck["net"].items() if k.endswith("fuse.0.weight")).shape[0]).to(dev)
     net.load_state_dict({k.replace("_orig_mod.", ""): v for k, v in ck["net"].items()})
     net.eval()
     return net, ck
@@ -293,7 +294,14 @@ def main() -> None:
     p.add_argument("--ckpt", default="", help="evaluate this one file and exit")
     p.add_argument("--dump", default="", help="with --ckpt: append the full result here")
     p.add_argument("--poll", type=float, default=30.0)
+    p.add_argument("--max-seconds", type=float, default=900.0,
+                   help="per evaluation; unfinished games are dropped, so raise it next "
+                        "to a training run")
+    p.add_argument("--gpu-frac", type=float, default=0.0,
+                   help="cap this process's share of GPU memory (next to a training run)")
     a = p.parse_args()
+    if a.gpu_frac:
+        torch.cuda.set_per_process_memory_fraction(a.gpu_frac)
 
     dev = torch.device("cuda")
     run = pathlib.Path(a.run)
@@ -322,7 +330,7 @@ def main() -> None:
         for name, pp, onet in nets:
             opps.append({"name": name, "act": greedy(onet, dev, n_envs), "path": str(pp)})
         res = evaluate(greedy(net, dev, n_envs), opps, maps, map_names, games=a.games,
-                       threads=a.threads)
+                       threads=a.threads, max_seconds=a.max_seconds)
         row = {"total_turns": turns, "iter": ck.get("iter"), "ckpt": str(path),
                "time": time.time(), "opponents": {o["name"]: o.get("path", "") for o in opps},
                **res}

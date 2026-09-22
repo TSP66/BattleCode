@@ -1,0 +1,90 @@
+{
+ "bot:random": {
+  "n": 32,
+  "score": 0.9688,
+  "win": 0.9375,
+  "draw": 0.0625,
+  "kills": 1.969,
+  "portal": 0.00212
+ },
+ "bot:greedy": {
+  "n": 32,
+  "score": 0.9844,
+  "win": 0.9688,
+  "draw": 0.0312,
+  "kills": 1.625,
+  "portal": 0.00477
+ },
+ "bot:splitter": {
+  "n": 32,
+  "score": 0.9844,
+  "win": 0.9688,
+  "draw": 0.0312,
+  "kills": 40.281,
+  "portal": 0.00241
+ },
+ "bot:blocker": {
+  "n": 32,
+  "score": 0.9219,
+  "win": 0.8438,
+  "draw": 0.1562,
+  "kills": 2.156,
+  "portal": 0.00383
+ },
+ "bot:portal": {
+  "n": 32,
+  "score": 0.9844,
+  "win": 0.9688,
+  "draw": 0.0312,
+  "kills": 1.812,
+  "portal": 0.00126
+ },
+ "bot:coward": {
+  "n": 32,
+  "score": 1.0,
+  "win": 1.0,
+  "draw": 0.0,
+  "kills": 2.0,
+  "portal": 0.00424
+ },
+ "anchor sss_r2": {
+  "n": 32,
+  "score": 0.5625,
+  "win": 0.5312,
+  "draw": 0.0625,
+  "kills": 65.844,
+  "portal": 0.0
+ },
+ "anchor sss_r1": {
+  "n": 32,
+  "score": 0.5781,
+  "win": 0.5625,
+  "draw": 0.0312,
+  "kills": 63.625,
+  "portal": 0.0
+ },
+ "anchor vibing_r4": {
+  "n": 32,
+  "score": 0.7188,
+  "win": 0.7188,
+  "draw": 0.0,
+  "kills": 84.656,
+  "portal": 0.0
+ },
+ "anchor vibing_r2": {
+  "n": 32,
+  "score": 0.5938,
+  "win": 0.5938,
+  "draw": 0.0,
+  "kills": 80.438,
+  "portal": 0.0
+ },
+ "anchor ft2_112721920": {
+  "n": 32,
+  "score": 0.7188,
+  "win": 0.7188,
+  "draw": 0.0,
+  "kills": 74.0,
+  "portal": 0.0
+ }
+}

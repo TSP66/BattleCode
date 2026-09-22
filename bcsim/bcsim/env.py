@@ -68,7 +68,8 @@ REWARD_COMPS = ["length_delta", "pearls", "sprint_cost", "split_cost", "died",
                 "kills", "enemy_deaths", "ally_deaths", "win", "lose", "draw",
                 "final_length", "splits",
                 "team_len", "team_max", "foe_len", "foe_max",
-                "portal"]
+                "portal", "eliminated", "team_units", "foe_units"]
+assert len(REWARD_COMPS) == N_REWARD_COMPS, "REWARD_COMPS is out of step with RW_COUNT"
 
 # A sensible starting point: grow, stay alive, win. Override per experiment.
 DEFAULT_REWARD_WEIGHTS = {
@@ -102,6 +103,9 @@ class Observation:
     dragon_id: np.ndarray  # (num_envs,) int32
     team: np.ndarray       # (num_envs,) int8
     round: np.ndarray      # (num_envs,) int32
+    # (num_envs, PRIV_COUNT) float32 privileged global features, only with
+    # BattlecodeVecEnv(privileged=True); for critics that never ship
+    priv: np.ndarray | None = None
 
 
 @dataclass
@@ -134,7 +138,8 @@ class BattlecodeVecEnv:
 
     def __init__(self, maps: list[str], num_envs: int = 64, num_threads: int = 8,
                  seed: int = 0, egocentric: bool = True, random_pearl_seed: bool = True,
-                 max_rounds: int = 500, closure_capacity: int | None = None):
+                 max_rounds: int = 500, closure_capacity: int | None = None,
+                 privileged: bool = False, board: bool = False):
         if not maps:
             raise ValueError("need at least one map")
         blob = b"".join(m.encode() for m in maps)
@@ -159,6 +164,28 @@ class BattlecodeVecEnv:
         _lib.bcv_bind(ctypes.c_void_p(self._h), *[a.ctypes.data for a in
                       (self._local, self._scalar, self._msgs, self._mask,
                        self._uid, self._dragon, self._team, self._round)])
+        self._priv = None
+        if privileged:
+            # only newer builds have it; a plain run never looks the symbol up
+            if not hasattr(_lib, "bcv_bind_priv"):
+                raise RuntimeError(f"{_LIB_PATH.name} has no privileged features; "
+                                   "build libbcvec_priv.so and set BCSIM_LIB")
+            _lib.bcv_priv_count.restype = ctypes.c_int
+            _lib.bcv_bind_priv.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            self._priv = np.zeros((num_envs, _lib.bcv_priv_count()), np.float32)
+            _lib.bcv_bind_priv(ctypes.c_void_p(self._h), self._priv.ctypes.data)
+        self.board = None
+        if board:
+            # (num_envs, BOARD_CH, BOARD_MAX, BOARD_MAX) uint8, the map in the
+            # top-left corner, relative to the acting dragon's team
+            if not hasattr(_lib, "bcv_bind_board"):
+                raise RuntimeError(f"{_LIB_PATH.name} has no board export; "
+                                   "build libbcvec_priv.so and set BCSIM_LIB")
+            shape = (ctypes.c_int * 2)()
+            _lib.bcv_board_shape(shape)
+            _lib.bcv_bind_board.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            self.board = np.zeros((num_envs, shape[0], shape[1], shape[1]), np.uint8)
+            _lib.bcv_bind_board(ctypes.c_void_p(self._h), self.board.ctypes.data)
 
         cap = closure_capacity or max(1024, num_envs * 140)
         self._cl_env = np.zeros(cap, np.int32)
@@ -192,7 +219,7 @@ class BattlecodeVecEnv:
 
     def observation(self) -> Observation:
         return Observation(self._local, self._scalar, self._msgs, self._mask,
-                           self._uid, self._dragon, self._team, self._round)
+                           self._uid, self._dragon, self._team, self._round, self._priv)
 
     # -------------------------------------------------- configuration
     def set_map_weights(self, weights) -> None:

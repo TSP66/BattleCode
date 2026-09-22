@@ -76,3 +76,43 @@ def policy_out(logits, mask, action=None):
     logp = logp_all.gather(1, action.unsqueeze(1)).squeeze(1)
     ent = -(logp_all.exp() * logp_all).sum(dim=1)
     return action, logp, ent
+
+
+class Critic(nn.Module):
+    """Value network with no weights shared with the policy.
+
+    Used by finetune.py, where the policy starts from a behaviour clone:
+    fitting a value through a shared trunk would move the policy while the
+    critic is still learning. The critic never ships, so it may see what the
+    deployed bot cannot: `context` is a one-hot of the opponent the episode is
+    played against. Without it, one value has to average over opponents of
+    very different strength, and its errors land in every advantage. So it
+    also has one value output per context: the trunk is shared, but no
+    opponent's returns are fitted by another opponent's output.
+    """
+
+    def __init__(self, n_channels: int, n_scalars: int, n_context: int,
+                 width: int = 64, blocks: int = 4, hidden: int = 512, n_extra: int = 0):
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv2d(n_channels, width, 3, padding=1, bias=False),
+            nn.GroupNorm(8, width), nn.SiLU())
+        self.blocks = nn.Sequential(*[ResBlock(width) for _ in range(blocks)])
+        self.flat = nn.Sequential(nn.Conv2d(width, 32, 1, bias=False),
+                                  nn.GroupNorm(8, 32), nn.SiLU(), nn.Flatten())
+        self.scalar = nn.Sequential(nn.Linear(n_scalars + n_context + n_extra, 128), nn.SiLU(),
+                                    nn.Linear(128, 128), nn.SiLU())
+        self.fuse = nn.Sequential(nn.Linear(32 * 7 * 7 + 128, hidden), nn.SiLU(),
+                                  nn.Linear(hidden, hidden), nn.SiLU())
+        self.v = nn.Linear(hidden, n_context)
+        nn.init.orthogonal_(self.v.weight, 1.0)
+        nn.init.zeros_(self.v.bias)
+
+    def forward(self, local, scalar, context, extra=None):
+        """context: one-hot (batch, n_context); extra: privileged features
+        (batch, n_extra) when built with them. Returns that context's value."""
+        x = self.flat(self.blocks(self.stem(local)))
+        parts = [scalar, context] if extra is None else [scalar, context, extra]
+        s = self.scalar(torch.cat(parts, dim=1))
+        v = self.v(self.fuse(torch.cat([x, s], dim=1)))
+        return (v * context).sum(dim=1)

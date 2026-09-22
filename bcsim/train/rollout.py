@@ -86,8 +86,13 @@ class Rollout:
         mask = self._p_mask.to(self.device, non_blocking=True).bool()
         return local, scalar, mask
 
-    def record(self, t: int, staged, obs, action, logp, value) -> None:
-        """Stores the observation acted on and the action taken, at slot t."""
+    def record(self, t: int, staged, obs, action, logp, value, learn=None) -> None:
+        """Stores the observation acted on and the action taken, at slot t.
+
+        `learn` (bool per env) marks the rows that train; the others (a frozen
+        opponent's turns) are stored but never linked, so they never close and
+        never enter a batch, and their closures count as orphans.
+        """
         local, scalar, mask = staged
         self.local[t].copy_(local, non_blocking=True)
         self.scalar[t].copy_(scalar, non_blocking=True)
@@ -96,16 +101,18 @@ class Rollout:
         self.logp[t] = logp
         self.value[t] = value
 
-        ids = (obs.uid & ID_MASK).astype(np.int64)
-        prev = self.slot[self.envs, ids]
+        envs = self.envs if learn is None else self.envs[learn]
+        uid = obs.uid if learn is None else obs.uid[learn]
+        ids = (uid & ID_MASK).astype(np.int64)
+        prev = self.slot[envs, ids]
         live = prev >= 0
         if live.any():
             # the previous transition of this agent must already have closed
-            unclosed = live & ~self.closed_cpu[prev.clip(0), self.envs]
+            unclosed = live & ~self.closed_cpu[prev.clip(0), envs]
             self.overwrites += int(unclosed.sum())
-            self.nxt_cpu[prev[live], self.envs[live]] = t
-        self.slot[self.envs, ids] = t
-        self.slot_uid[self.envs, ids] = obs.uid
+            self.nxt_cpu[prev[live], envs[live]] = t
+        self.slot[envs, ids] = t
+        self.slot_uid[envs, ids] = uid
 
     def close(self, closures, weights: np.ndarray) -> None:
         """Applies finished transitions: reward into their slot, done flag set."""

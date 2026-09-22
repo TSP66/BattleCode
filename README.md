@@ -14,6 +14,9 @@ simulator and shipped as a C++ bot with the weights compiled in.
 | `mybot/` | The C++ submission. `weights_data.hpp` is generated, not committed |
 | `wasmprobe/` | Judge-cost metering, parity checks, `check_bot.sh`, `submit.sh` |
 | `archive/` | Old probes and Python bots, kept for reference |
+| `runs/replays/` | Scraped games of the top teams (datasets are rebuilt, see `DISTILL.md`) |
+
+**Distillation on another machine: see `DISTILL.md`.** Current RL state: `HANDOFF.md`.
 
 ## Setup (new machine)
 

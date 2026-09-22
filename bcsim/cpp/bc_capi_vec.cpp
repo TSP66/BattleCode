@@ -52,6 +52,11 @@ void* bcv_create(const char* maps_blob, const int* map_lengths, int num_maps,
     return h;
 }
 
+void bcv_bind_priv(void* p, float* priv) { ((VecHandle*)p)->env->bind_priv(priv); }
+int bcv_priv_count() { return PRIV_COUNT; }
+void bcv_bind_board(void* p, uint8_t* board) { ((VecHandle*)p)->env->bind_board(board); }
+void bcv_board_shape(int* out) { out[0] = BOARD_CH; out[1] = BOARD_MAX; }
+
 void bcv_destroy(void* p) {
     auto* h = (VecHandle*)p;
     delete h->env;

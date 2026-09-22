@@ -526,11 +526,13 @@ def size_weight(w: int, h: int, alpha: float) -> float:
 
 def build_pool(map_dir: str, per_map: int, seed: int, alpha: float,
                original_share: float = 0.25, cfg: AugConfig = AugConfig()):
-    """Returns (texts, weights, base_names): every base map plus `per_map`
-    variants of it, weighted so each base map's total is its size weight and
-    the untouched original keeps `original_share` of that."""
+    """Returns (texts, weights, base_names, areas): every base map plus
+    `per_map` variants of it, weighted so each base map's total is its size
+    weight and the untouched original keeps `original_share` of that. `areas`
+    is each entry's base map area, so the size weighting can be redone with
+    another alpha (see `reweight`)."""
     rng = np.random.default_rng(seed)
-    texts, weights, names = [], [], []
+    texts, weights, names, areas = [], [], [], []
     for f in sorted(pathlib.Path(map_dir).glob("*.map")):
         text = f.read_text()
         base = parse(text)
@@ -545,11 +547,19 @@ def build_pool(map_dir: str, per_map: int, seed: int, alpha: float,
         texts.append(text)
         weights.append(total * share)
         names.append(f.stem)
+        areas.append(base.w * base.h)
         for v in variants:
             texts.append(v)
             weights.append(total * (1 - share) / len(variants))
             names.append(f.stem)
-    return texts, np.array(weights), names
+            areas.append(base.w * base.h)
+    return texts, np.array(weights), names, np.array(areas, dtype=np.float64)
+
+
+def reweight(weights: np.ndarray, areas: np.ndarray, alpha_from: float,
+             alpha_to: float) -> np.ndarray:
+    """Pool weights built with `alpha_from`, redone for `alpha_to`."""
+    return weights * (256.0 / areas) ** (alpha_to - alpha_from)
 
 
 def main() -> None:

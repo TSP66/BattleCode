@@ -1,0 +1,90 @@
+{
+ "bot:random": {
+  "n": 96,
+  "score": 0.9844,
+  "win": 0.9688,
+  "draw": 0.0312,
+  "kills": 1.781,
+  "portal": 0.00218
+ },
+ "bot:greedy": {
+  "n": 96,
+  "score": 0.9896,
+  "win": 0.9896,
+  "draw": 0.0,
+  "kills": 1.615,
+  "portal": 0.00109
+ },
+ "bot:splitter": {
+  "n": 96,
+  "score": 1.0,
+  "win": 1.0,
+  "draw": 0.0,
+  "kills": 37.969,
+  "portal": 0.00133
+ },
+ "bot:blocker": {
+  "n": 96,
+  "score": 0.9479,
+  "win": 0.8958,
+  "draw": 0.1042,
+  "kills": 2.188,
+  "portal": 0.00184
+ },
+ "bot:portal": {
+  "n": 96,
+  "score": 1.0,
+  "win": 1.0,
+  "draw": 0.0,
+  "kills": 1.76,
+  "portal": 0.0019
+ },
+ "bot:coward": {
+  "n": 96,
+  "score": 0.9896,
+  "win": 0.9896,
+  "draw": 0.0,
+  "kills": 1.812,
+  "portal": 0.00235
+ },
+ "submitted v9": {
+  "n": 96,
+  "score": 0.375,
+  "win": 0.375,
+  "draw": 0.0,
+  "kills": 63.677,
+  "portal": 0.0
+ },
+ "anchor sabotage": {
+  "n": 96,
+  "score": 0.1927,
+  "win": 0.1875,
+  "draw": 0.0104,
+  "kills": 71.927,
+  "portal": 0.0
+ },
+ "anchor shink_r1": {
+  "n": 96,
+  "score": 0.2188,
+  "win": 0.2188,
+  "draw": 0.0,
+  "kills": 63.708,
+  "portal": 0.0
+ },
+ "anchor sss_r3": {
+  "n": 96,
+  "score": 0.2292,
+  "win": 0.2292,
+  "draw": 0.0,
+  "kills": 57.031,
+  "portal": 0.0
+ },
+ "anchor vibing_r4": {
+  "n": 96,
+  "score": 0.401,
+  "win": 0.3958,
+  "draw": 0.0104,
+  "kills": 74.135,
+  "portal": 0.0
+ }
+}

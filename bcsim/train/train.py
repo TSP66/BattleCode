@@ -101,9 +101,38 @@ REWARD_V3 = {
 # team_max; it is not free, which is what exploded in v0.
 REWARD_V4 = {**REWARD_V3, "splits": -0.05}
 
-REWARDS = {"v1": REWARD_V1, "v2": REWARD_V2, "v3": REWARD_V3, "v4": REWARD_V4}
+# v5: v4 with no split fee at all. A split already pays the parent's
+# length_delta (-0.03 per segment handed over) and, when it splits the leader,
+# the drop in team_max, so the flat fee was a third charge for one event.
+# died -0.25 -> -0.2; an even head-on still nets -0.2 - 0.03 * length per
+# dragon, so mutual kamikaze stays a loss.
+REWARD_V5 = {**REWARD_V4, "splits": 0.0, "died": -0.2}
+
+# v6: v5 against mobbing. Opponents that split early and swarm our 1-5
+# dragons with small heads were winning by elimination, because a head-on
+# kills both dragons whatever their size.
+#  * eliminated: the result was paid only to survivors, so a wiped-out team
+#    was never charged `lose` and elimination cost less than losing on length
+#    at round 500. Charged to the dragons that die on the wiping turn (not on
+#    a mutual wipe-out, which is a draw).
+#  * team_units / foe_units: zero-sum potentials over log(1 + living units),
+#    pricing how exposed a small team is to elimination. Concave so it cannot
+#    rebuild v0's shredding: 1 -> 2 dragons pays +0.12, 20 -> 21 pays +0.014,
+#    while halving a length-20 leader costs ~-0.6 through team_max.
+REWARD_V6 = {**REWARD_V5, "eliminated": -1.0, "team_units": 0.3, "foe_units": -0.3}
+
+# v7 (planned, not implemented): v6 plus a zero-sum exposure potential,
+# phi = -0.02 * sum over our dragons of max(0, our_len - their_len) for enemy
+# heads within Manhattan 2 of our head (mirrored for theirs). Teaches the
+# leader to keep away from small heads before the trade rather than after,
+# and pays the shared policy to mob, so self-play produces the opponent it
+# has to learn to defend against. Kept separate from v6 to attribute effects.
+
+REWARDS = {"v1": REWARD_V1, "v2": REWARD_V2, "v3": REWARD_V3, "v4": REWARD_V4,
+           "v5": REWARD_V5, "v6": REWARD_V6}
 # v1/v2 used plain differences in the team potentials
-POTENTIAL_DISCOUNT = {"v1": False, "v2": False, "v3": True, "v4": True}
+POTENTIAL_DISCOUNT = {"v1": False, "v2": False, "v3": True, "v4": True, "v5": True,
+                      "v6": True}
 
 
 def parse() -> argparse.Namespace:
@@ -138,6 +167,11 @@ def parse() -> argparse.Namespace:
     p.add_argument("--aug-original-share", type=float, default=0.25)
     p.add_argument("--size-alpha", type=float, default=0.75,
                    help="map weight = (256 / area) ** alpha; 0 = uniform")
+    # small maps are where a young policy learns fastest, but staying biased
+    # toward them trains for the wrong mix, so alpha falls linearly to 0
+    # (every base map equally likely) over this many turns
+    p.add_argument("--size-alpha-decay", type=float, default=2e9,
+                   help="turns for alpha to reach 0; 0 = keep --size-alpha fixed")
     p.add_argument("--aug-refresh", type=int, default=0,
                    help="rebuild the variants every this many iterations (0 = never); "
                         "restarts every game in progress")
@@ -170,16 +204,21 @@ def main() -> None:
 
     def make_env(generation: int):
         seed = a.seed + 7919 * start_iter + 104729 * generation
-        texts, map_w, names = augment.build_pool(a.maps, a.aug_per_map, seed, a.size_alpha,
-                                                 a.aug_original_share)
+        texts, map_w, names, areas = augment.build_pool(a.maps, a.aug_per_map, seed,
+                                                        a.size_alpha, a.aug_original_share)
         e = bcsim.BattlecodeVecEnv(texts, num_envs=a.envs, num_threads=a.threads,
                                    seed=seed, closure_capacity=max(8192, a.envs * 160))
         e.set_map_weights(map_w)
         if POTENTIAL_DISCOUNT[a.reward]:
             e.set_potential_gamma(a.gamma)
-        return e, names, map_w
+        return e, names, map_w, areas
 
-    env, map_base, map_w = make_env(0)
+    def size_alpha(total: int) -> float:
+        if a.size_alpha_decay <= 0:
+            return a.size_alpha
+        return a.size_alpha * max(0.0, 1.0 - total / a.size_alpha_decay)
+
+    env, map_base, map_w, map_area = make_env(0)
     base_names = sorted(set(map_base))
     share = {b: float(map_w[[n == b for n in map_base]].sum() / map_w.sum()) for b in base_names}
     print(f"{len(map_base)} maps in the pool; sampling share by base map: " +
@@ -220,8 +259,11 @@ def main() -> None:
         ent_w = ent_coef(done_turns)
         if a.aug_refresh and it > start_iter and (it - start_iter) % a.aug_refresh == 0:
             env.close()
-            env, map_base, map_w = make_env((it - start_iter) // a.aug_refresh)
+            env, map_base, map_w, map_area = make_env((it - start_iter) // a.aug_refresh)
             obs = env.reset()
+        alpha = size_alpha(done_turns)
+        # takes effect from each env's next episode
+        env.set_map_weights(augment.reweight(map_w, map_area, a.size_alpha, alpha))
         net.eval()
         roll.begin()
         ep_rows, t_env, t_fwd = [], 0.0, 0.0
@@ -302,6 +344,7 @@ def main() -> None:
             "turns": turns,
             "total_turns": done_turns + turns,
             "ent_coef": round(ent_w, 6),
+            "size_alpha": round(alpha, 4),
             "sps": turns / (t_roll + t_opt),
             "roll_sps": turns / t_roll,
             "t_env": round(t_env, 2), "t_fwd": round(t_fwd, 2), "t_opt": round(t_opt, 2),

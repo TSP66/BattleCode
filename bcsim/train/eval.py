@@ -141,7 +141,8 @@ def main() -> None:
     ck = torch.load(args.ckpt, map_location=dev, weights_only=False)
     a = ck["args"]
     net = ActorCritic(bcsim.N_CHANNELS, bcsim.N_SCALARS, bcsim.N_ACTIONS,
-                      width=a["width"], blocks=a["blocks"]).to(dev)
+                      width=a["width"], blocks=a["blocks"],
+                      hidden=next(v for k, v in ck["net"].items() if k.endswith("fuse.0.weight")).shape[0]).to(dev)
     state = {k.replace("_orig_mod.", ""): v for k, v in ck["net"].items()}
     net.load_state_dict(state)
     net.eval()

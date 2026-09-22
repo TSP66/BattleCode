@@ -86,6 +86,7 @@ h3{font-size:15px;margin:30px 0 4px}
   <h1>Battlecode self-play</h1>
   <div class="sub"><span class="dot" id="live"></span><span id="status">connecting…</span></div>
   <div id="err"></div>
+  <div id="ratchet"></div>
   <div class="tiles" id="tiles"></div>
   <div class="grid" id="grid"></div>
   <h3>Yardsticks</h3>
@@ -99,6 +100,25 @@ h3{font-size:15px;margin:30px 0 4px}
 const PAL = ['--s1','--s2','--s3','--s4','--s5','--s6','--s7'];
 // each chart: title, note, series [{key,label}]; all series in one chart share a unit
 const CHARTS = [
+  // fine-tuning (train/finetune.py); these stay empty for a plain self-play run
+  {t:'Win rate vs frozen opponents', n:'fine-tune: learner score per opponent, from training games (sampled play; the yardstick below is greedy)',
+   prefix:'vs_', raw:false},
+  {t:'KL to teacher', n:'fine-tune: KL(clone || policy) on visited states; the drift the KL penalty holds back', s:[{k:'kl_teacher'}]},
+  {t:'Explained variance per opponent', n:'fine-tune: one line per critic slot; a slot far below the others is being dragged',
+   prefix:'ev_', zero:true, exclude:['ev_self']},
+  // team-level critic (train/finetune_team.py); empty for other runs
+  {t:'Team critic: explained variance', n:'team head (p_win - p_loss vs its TD target; inflated early, it partly scores itself) and self head (dense-shaping return)',
+   s:[{k:'explained_var',l:'team (TD)'},{k:'ev_self',l:'self head'},{k:'ev_self_ema',l:'self head EMA (policy gate: 0.12)'}], zero:true},
+  {t:'Team critic: calibration vs real results', n:'on games that finished this iteration: EV of p_win - p_loss against the actual result, and win-probability calibration error (ECE)',
+   s:[{k:'calib_ev',l:'EV vs result'},{k:'calib_ece_win',l:'ECE (win)'}], zero:true},
+  {t:'Team critic: calibration by round', n:'EV of p_win - p_loss against the real result, by the round the position was seen (buckets need 50+ positions)',
+   prefix:'calib_ev_r', zero:true},
+  {t:'A_team vs A_self correlation', n:'near 0 = the two advantages carry different information; near 1 = redundant',
+   s:[{k:'adv_corr'}], zero:true},
+  {t:'Critic losses', n:'team head cross-entropy and self head MSE', s:[{k:'v_team',l:'team CE (TD target)'},{k:'v_mc',l:'team CE (real results)'},{k:'v_self',l:'self MSE'}]},
+  {t:'Real-result buffer', n:'labelled positions (their game has ended) the team head trains on; the real-result loss starts at 20k', s:[{k:'mc_n'}]},
+  {t:'Critic warm-up', n:'fine-tune: 1 while the policy is frozen and only the critic trains', s:[{k:'warmup'}], raw:true},
+  {t:'Time per iteration', n:'seconds spent collecting vs optimising', s:[{k:'t_roll',l:'rollout'},{k:'t_opt',l:'optimise'}]},
   {t:'Mean reward per turn', n:'weighted reward per closed transition', s:[{k:'reward_mean'}]},
   {t:'Return and value', n:'GAE return vs what the critic predicts',
    s:[{k:'return_mean',l:'return'},{k:'value_mean',l:'value'}]},
@@ -140,6 +160,7 @@ let rows=[];
 function draw(){
   const grid=document.getElementById('grid');
   if(!grid.children.length) CHARTS.forEach((c,i)=>{
+    c.s=c.s||[];
     const d=document.createElement('div'); d.className='card'; d.id='c'+i;
     d.innerHTML=`<h2>${c.t}</h2><div class="note">${c.n}</div><div class="plot"></div>`+
       (c.s.length>1?`<div class="legend">`+c.s.map((s,j)=>
@@ -147,7 +168,21 @@ function draw(){
     grid.appendChild(d);
   });
   const x = rows.map(r=>r.total_turns/1e6);
-  CHARTS.forEach((c,i)=>plot(document.querySelector('#c'+i+' .plot'), c, x, rows));
+  CHARTS.forEach((c,i)=>{
+    if(c.prefix){
+      // series discovered from the log: one per key with this prefix
+      const keys=[...new Set(rows.flatMap(r=>Object.keys(r).filter(k=>k.startsWith(c.prefix)&&!(c.exclude||[]).includes(k))))].sort();
+      const label=k=>{const t=k.slice(c.prefix.length);
+        return c.prefix==='ev_'?(t==='0'?'self-play':'opponent '+t):t;};
+      if(JSON.stringify(keys)!==JSON.stringify(c._keys||[])){
+        c._keys=keys; c.s=keys.map(k=>({k,l:label(k)}));
+        const card=document.getElementById('c'+i); let lg=card.querySelector('.legend');
+        if(!lg){lg=document.createElement('div');lg.className='legend';card.appendChild(lg);}
+        lg.innerHTML=c.s.map((s,j)=>`<span><i style="background:var(${PAL[j%PAL.length]})"></i>${s.l}</span>`).join('');
+      }
+    }
+    plot(document.querySelector('#c'+i+' .plot'), c, x, rows);
+  });
 }
 function plot(host,cfg,x,rows){
   const W=520,H=190,L=54,R=12,T=10,B=26;
@@ -202,6 +237,8 @@ function tiles(){
     ['score vs bots',evLast?fmt(evLast.bot_score):'–'],
     [evLast&&evLast.submitted_name?'vs '+evLast.submitted_name:'vs submitted',
      evLast&&evLast.submitted_score!=null?fmt(evLast.submitted_score):'–'],['kills / game',fmt(r.kills_per_game)]];
+  if(r.kl_teacher!=null) items.push(['KL to teacher',fmt(r.kl_teacher)],['phase',r.warmup?'critic warm-up':'training']);
+  for(const k of Object.keys(r).filter(k=>k.startsWith('vs_'))) items.push(['vs '+k.slice(3),fmt(r[k])]);
   box.innerHTML=items.map(([k,v])=>`<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
 }
 // Resolve relative to the current path so this works behind a proxy prefix
@@ -276,6 +313,53 @@ async function pollEval(){
   }catch(e){}
 }
 pollEval(); setInterval(pollEval,30000);
+// ---- ratchet (train/ratchet.py): state.json + one row per gate decision
+async function pollRatchet(){
+  try{
+    const q=new URLSearchParams(location.search);
+    const res=await fetch(BASE+'ratchet?'+q.toString(),{cache:'no-store'});
+    if(!res.ok) return;
+    const j=await res.json(); if(!j.state) return;
+    const st=j.state, gs=j.gens, box=document.getElementById('ratchet');
+    const vcol={promote:'var(--s3)',extend:'var(--s4)',discard:'#e34948'};
+    const cand=st.cand?`gen ${st.gen} · segment ${st.segment}`:'between candidates';
+    const tile=(k,v)=>`<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`;
+    let h=`<h3 style="margin-top:0">Ratchet</h3><div class="sec">A candidate trains from the anchor for one segment; the gate plays it greedily
+      against the anchor (${gs.length?gs[gs.length-1].n_anchor:384} games) and the league (96 each). Promote at &ge; 0.55 vs the anchor with no league
+      score more than 0.10 below the anchor's; extend a candidate that is not worse; discard the rest.</div>
+      <div class="tiles">${tile('anchor',st.anchor_name)}${tile('training',cand)}${tile('promotions',st.promotions)}
+      ${tile('gates',gs.length)}${tile('learning rate',st.lr)}${tile('experiment turns',fmt(st.turns))}</div>`;
+    if(st.anchor_scores){
+      h+=`<div class="sec">Anchor's gate scores (training opponents are weighted toward the low ones): `+
+        Object.entries(st.anchor_scores).map(([k,v])=>`<b>${k}</b> ${v.toFixed(2)}`).join(' · ')+`</div>`;
+    }
+    if(gs.length){
+      h+=`<div class="grid"><div class="card" id="rgate"><h2>Gate: candidate vs anchor</h2>
+        <div class="note">one point per gate; dashed line = 0.55 promotion bar</div><div class="plot"></div></div></div>`;
+      const names=[...new Set(gs.flatMap(g=>Object.keys(g.scores)))].filter(n=>n!=='anchor');
+      h+=`<div class="hm"><table><tr><th>time</th><th>gate</th><th>turns</th><th>anchor</th><th>vs anchor</th>`+
+        names.map(n=>`<th>${n}</th>`).join('')+`<th>worst drop</th><th>verdict</th></tr>`;
+      for(const g of [...gs].reverse()){
+        const t=new Date(g.time*1000);
+        h+=`<tr><th>${t.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</th><th>${g.tag}</th><td>${fmt(g.total_turns)}</td><td>${g.anchor_name}</td>
+          <td style="font-weight:600">${g.vs_anchor.toFixed(3)}</td>`+
+          names.map(n=>{const v=g.scores[n], b=(g.anchor_scores||{})[n];
+            return v==null?'<td>–</td>':`<td title="anchor ${b!=null?b.toFixed(2):'–'}">${v.toFixed(2)}${b!=null?
+              ` <span style="color:var(--ink-3)">(${(v-b>=0?'+':'')+(v-b).toFixed(2)})</span>`:''}</td>`;}).join('')+
+          `<td>${g.worst_drop>=0?'-':'+'}${Math.abs(g.worst_drop).toFixed(2)} ${g.worst_drop_vs}</td>
+          <td style="color:${vcol[g.verdict]};font-weight:600">${g.verdict}</td></tr>`;
+      }
+      h+='</table></div>';
+    }
+    box.innerHTML=h;
+    if(gs.length){
+      const rows_=gs.map((g,i)=>({x:i+1,v:g.vs_anchor,bar:0.55}));
+      plot(document.querySelector('#rgate .plot'),{t:'vs anchor',raw:true,
+        s:[{k:'v',l:'vs anchor'},{k:'bar',l:'promotion bar'}]}, rows_.map(r=>r.x), rows_);
+    }
+  }catch(e){}
+}
+pollRatchet(); setInterval(pollRatchet,20000);
 let lastLen=-1, lastChange=Date.now();
 async function poll(){
   try{
@@ -336,6 +420,23 @@ def serve(run: pathlib.Path, port: int, host: str = "127.0.0.1",
                 # per-map cells only for the newest; the curves need summaries
                 slim = [{k: v for k, v in r.items() if k != "cells"} for r in rows]
                 body = json.dumps({"rows": slim, "last": last}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Cache-Control", "no-store")
+            elif tail.endswith("ratchet"):
+                state, gens = None, []
+                if (run / "state.json").exists():
+                    try:
+                        state = json.loads((run / "state.json").read_text())
+                    except json.JSONDecodeError:
+                        pass
+                if (run / "gens.jsonl").exists():
+                    for line in (run / "gens.jsonl").read_text().splitlines():
+                        try:
+                            gens.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            pass
+                body = json.dumps({"state": state, "gens": gens}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Cache-Control", "no-store")
