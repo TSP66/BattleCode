@@ -9,7 +9,9 @@ simulator and shipped as a C++ bot with the weights compiled in.
 | `bcsim/bcsim/` | Python ctypes wrapper (`BattlecodeVecEnv`); `make -C bcsim` builds the `.so` files here |
 | `bcsim/train/` | `train.py` (PPO), `yardstick.py` (eval worker), `dash.py` (dashboard), `augment.py` (map variants), `export_cpp.py` |
 | `bcsim/tests/` | Parity tests against the real engine, reward tests |
-| `maps/` | Training/eval maps (`maps-official/` = the official set as downloaded) |
+| `maps/` | **The training pool: every map we have, all active** (12 as of 2026-09-23, retired ones included) |
+| `maps-live/` | The server's current rotation, straight from `GET /api/v1/maps` (7 maps as of 2026-09-23). Grade on these |
+| `maps-official/` | The official maps as downloaded, current and retired |
 | `runs/anchors/`, `runs/submitted/` | Frozen opponents the yardstick always plays (committed); everything else in `runs/` is ignored |
 | `mybot/` | The C++ submission. `weights_data.hpp` is generated, not committed |
 | `wasmprobe/` | Judge-cost metering, parity checks, `check_bot.sh`, `submit.sh` |

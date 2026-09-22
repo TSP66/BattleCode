@@ -30,7 +30,9 @@ Run every command from `bcsim/` (`cd bcsim`). Use `../.venv-train/bin/python`.
 | path | what |
 |---|---|
 | `runs/replays/<team>/games/` | every scraped game: `<id>.replay` (gzipped Cap'n Proto) + `<id>.json` (match metadata), and `series.jsonl` |
-| `runs/ft3/maps/` | the 8 maps in the live server rotation; every eval uses these |
+| `runs/ft3/maps/` | the 8 maps the rotation held until 2026-09-22; the ratchet run and every eval so far use these |
+| `maps-live/` | the rotation as of 2026-09-23: Arena and Colloseum out, **Devil** (32x16) in, 7 maps. Grade on these |
+| `maps/` | all 12 maps, all active for training: the live 7 plus arena, Colloseum, help, small, queen_of_spades_but_she_ages |
 | `runs/anchors/*.pt` | frozen clones used as eval/training opponents |
 | `runs/submitted/v*.pt` + `submitted.jsonl` | every uploaded network |
 | `runs/imitate_*/best.pt`, `log.jsonl` | every behaviour clone and its training curve |

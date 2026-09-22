@@ -1,3 +1,53 @@
+# Handoff — 2026-09-23 ~09:40: rotation changed, and `maps/` is now the full local pool
+
+## The server swapped maps on 2026-09-22 12:54
+Out: **Arena**, **Colloseum**. In: **Devil** (32x16, symmetry y, 3 dragons a side of length 4,
+heavy vertical kelp corridors, 128 pearl-rich tiles). The live rotation is 7 maps: big_empty,
+default, default_small, devil, queen_of_spades, schooltime, trophy. Confirmed two ways:
+`GET /api/v1/maps`, and the mapIds of the scraped ladder games (1 and 2 stop at 12:50, 13 starts
+at 12:54, all seven uniform at ~1/7 since). Re-pull with `python -m train.maps_fetch [--check]`.
+
+## Map directories now (the user, 2026-09-23: "locally we want all maps to be active")
+| dir | what | use |
+|---|---|---|
+| `maps/` | all 12: the live 7 + arena, Colloseum, help, small, queen_of_spades_but_she_ages | TRAIN on these |
+| `maps-live/` | the server's current 7 | GRADE on these |
+| `maps-official/` | official maps as downloaded, current and retired | archive |
+| `runs/ft3/maps/` | the old 8; what the live ratchet is using | leave alone |
+
+**Next run:** `--maps ../maps` to train on all 12. Keep gates on `../maps-live`, so gate scores
+still mean "ladder strength". Old gate numbers were on the old 8, so gen-to-gen comparisons
+across the switch are not exact.
+
+**Weighting to decide:** `build_pool` weights every base map equally, so all 12 active puts
+only 58% of training on the live 7 and 42% on maps we are never graded on. If that is too much,
+the fix is a per-map weight multiplier in `augment.build_pool` (it has no such knob today) --
+not written yet, because editing `augment.py` would land in the LIVE ratchet at its next segment.
+
+## Verified (2026-09-23, all 12 maps)
+`augment.build_pool('../maps', 48)` -> 588 entries, 12 base maps, every variant parses; random
+self-play plays clean on all 12. Per map, random play: Colloseum 22 rounds mean, arena 36,
+small 35, default_small 96, queen_of_spades 111, she_ages 113, trophy 125, schooltime 133,
+default 146, devil 212, big_empty 474, **help finishes no game inside 500 rounds** (64x64,
+6 dragons a side, 4096 pearl tiles, ~77 agent-steps per round). help and big_empty are not
+broken, just long -- but with the ratchet's result-only reward they yield few terminal results
+per turn, which is another reason to consider down-weighting them.
+
+## The live ratchet was NOT touched
+Still on `runs/ft3/maps` (the old 8), gen 4, 966M turns, ~34.5k turns/s, 10h40m in.
+Swapping its maps or its code mid-run would make gate scores incomparable across generations --
+and note the supervisor re-spawns `train.ratchet_train` (so it re-imports `augment.py`) at every
+segment, so an edit to those files DOES reach a running experiment.
+
+## Two footnotes
+- A **private map** (id 12) appears in ~3% of the even-hour ladder rounds. Its replays carry a
+  placeholder ("INTERNAL_PRIVATE_TESTING_MAP", 64x64), so it cannot be mirrored: we play it blind.
+- Not drift: the server's big_empty and default now omit 128/64 redundant `EDGE ... 0 -1`
+  (open, no portal) lines. Same maps; `maps/` and `maps-official/` refreshed to the server text.
+- `train.py`'s `small_map_frac` metric lists small maps by name and does not include devil.
+  Left as is on purpose: devil averages 212 rounds, nothing like arena (36) or Colloseum (22).
+
+---
 # Handoff — 2026-09-22 ~21:30 (latest): THE RATCHET is running
 
 - **What:** `bcsim/train/ratchet.py` (supervisor + gate) and `bcsim/train/ratchet_train.py` (segments).
