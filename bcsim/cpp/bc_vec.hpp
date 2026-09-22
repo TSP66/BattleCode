@@ -281,6 +281,131 @@ public:
         return decode_for(d, action_id);
     }
 
+    // What each codec move would do right now, tried on a copy of the game
+    // (the env itself is untouched). Used to label replays, never to act.
+    // out[0..2] = enemy dragons alive, the longest enemy's length, our team's
+    // dragons alive, all before the move; then PROBE_FIELDS per move id
+    // 0..CODEC_MOVES-1 (see PROBE_*), all zero for a move the mask forbids.
+    //
+    // "Trapped" is conservative: every way forward is kelp or a body segment
+    // that cannot move out of the way first (not a head, not someone else's
+    // tail; its own tail still kills it), and it is too short to split, or
+    // its team is full.
+    enum { PROBE_OUR_ALIVE = 0, PROBE_KILLED, PROBE_LONGEST_KILLED, PROBE_ENEMY_ALIVE,
+           PROBE_TRAPPED, PROBE_LONGEST_TRAPPED, PROBE_KILLED_LEN, PROBE_AREA, PROBE_FIELDS };
+    static constexpr int PROBE_AREA_CAP = 128;
+
+    // Free cells reachable from the acting dragon's head (not counting it),
+    // through edges a step can cross, up to PROBE_AREA_CAP. Every body is a
+    // wall, tails included: a lower bound on the room the dragon has.
+    static int free_area(const Game& g, int di) {
+        const MapData& m = *g.map;
+        const Dragon& d = g.dragons[di];
+        std::vector<int16_t> queue;
+        std::vector<char> seen(m.area(), 0);
+        queue.push_back(d.head());
+        seen[d.head()] = 1;
+        static const char DIRS[4] = {'N', 'E', 'S', 'W'};
+        int n = 0;
+        for (size_t q = 0; q < queue.size() && n < PROBE_AREA_CAP; q++) {
+            const int c = queue[q];
+            for (char dir : DIRS) {
+                int nx, ny;
+                if (!tile_after_step(m, c % m.w, c / m.w, dir, nx, ny)) continue;
+                const int t = m.idx(nx, ny);
+                if (seen[t] || g.owner[t] >= 0) continue;
+                seen[t] = 1;
+                queue.push_back((int16_t)t);
+                if (++n >= PROBE_AREA_CAP) break;
+            }
+        }
+        return n;
+    }
+
+    static bool trapped(const Game& g, int j) {
+        const Dragon& d = g.dragons[j];
+        const MapData& m = *g.map;
+        if (!d.alive) return false;
+        if (d.len >= 4 && g.alive[d.team] < m.unit_limit) return false;   // can split
+        const int x = d.head() % m.w, y = d.head() / m.w;
+        const char back = Game::opposite(d.facing);
+        static const char DIRS[4] = {'N', 'E', 'S', 'W'};
+        for (char dir : DIRS) {
+            if (dir == back) continue;
+            int nx, ny;
+            if (!tile_after_step(m, x, y, dir, nx, ny)) continue;          // kelp
+            const int t = m.idx(nx, ny);
+            const int16_t occ = g.owner[t];
+            if (occ < 0) return false;
+            if (occ == (int16_t)j) continue;                               // own body or tail
+            if (g.head_at[t]) return false;                                // may move away
+            if (g.dragons[occ].tail() == (int16_t)t) return false;         // may vacate
+        }
+        return true;
+    }
+
+    void probe(int env_index, int32_t* out) const {
+        const Env& e = envs_[env_index];
+        const Game& g0 = e.game;
+        const int di = e.acting;
+        const int me = g0.dragons[di].team, foe = 1 - me;
+        int longest = 0;
+        for (const Dragon& d : g0.dragons)
+            if (d.alive && d.team == foe) longest = std::max(longest, d.len);
+        std::vector<char> was_trapped(g0.dragons.size(), 0);
+        for (size_t j = 0; j < g0.dragons.size(); j++)
+            if (g0.dragons[j].alive && g0.dragons[j].team == foe) was_trapped[j] = trapped(g0, (int)j);
+        out[0] = g0.alive[foe];
+        out[1] = longest;
+        out[2] = g0.alive[me];
+        const uint8_t* mask = b_mask_ + (size_t)env_index * CODEC_ACTIONS;
+        for (int id = 0; id < CODEC_MOVES; id++) {
+            int32_t* o = out + 3 + id * PROBE_FIELDS;
+            for (int k = 0; k < PROBE_FIELDS; k++) o[k] = 0;
+            if (!mask[id]) continue;
+            Game g = g0;
+            g.record_events = false;
+            const Action a = decode_for(g.dragons[di], id);
+            char dirs[MAX_STEPS];
+            for (int s = 0; s < a.n_steps; s++) dirs[s] = dir_char(a.dirs[s]);
+            g.move(di, dirs, a.n_steps);
+            o[PROBE_OUR_ALIVE] = g.dragons[di].alive;
+            o[PROBE_AREA] = g.dragons[di].alive ? free_area(g, di) : 0;
+            o[PROBE_ENEMY_ALIVE] = g.alive[foe];
+            for (size_t j = 0; j < g.dragons.size(); j++) {
+                const Dragon& before = g0.dragons[j];
+                if (!before.alive || before.team != foe) continue;
+                const bool is_longest = before.len == longest;
+                if (!g.dragons[j].alive) {
+                    o[PROBE_KILLED]++;
+                    o[PROBE_KILLED_LEN] += before.len;
+                    if (is_longest) o[PROBE_LONGEST_KILLED] = 1;
+                } else if (!was_trapped[j] && trapped(g, (int)j)) {
+                    o[PROBE_TRAPPED]++;
+                    if (is_longest) o[PROBE_LONGEST_TRAPPED] = 1;
+                }
+            }
+        }
+    }
+
+    // Deaths the last action caused in env_index: (dragon id, reason, killer
+    // id or -1, team) rows, at most cap. Read right after a step.
+    int last_deaths(int env_index, int32_t* out, int cap) const {
+        const Env& e = envs_[env_index];
+        int n = 0;
+        for (const Event& ev : e.game.events) {
+            if (ev.kind != EV_DEATH) continue;
+            if (n < cap) {
+                out[4 * n] = ev.a;
+                out[4 * n + 1] = ev.b;
+                out[4 * n + 2] = ev.d;
+                out[4 * n + 3] = e.game.dragons[ev.a].team;
+            }
+            n++;
+        }
+        return n;
+    }
+
     static Action decode_for(const Dragon& d, int action_id) {
         Action a{};
         a.kind = 2;

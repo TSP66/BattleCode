@@ -52,3 +52,8 @@ archive/**/*.npz
 archive/**/*.dat
 archive/probe/maps/
 runs/critic_probe/data/
+
+# derived replay labels (train.super_sprint, train.self_trap): rebuilt in minutes
+runs/replays/*/sprint/
+runs/replays/*/selftrap/
+.DS_Store

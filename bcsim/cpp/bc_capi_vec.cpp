@@ -146,6 +146,15 @@ int bcv_episodes(void* p, int* out, int cap) {
     return (int)ep.size();
 }
 
+// Outcomes of every codec move for the acting dragon (VecEnv::probe).
+void bcv_probe(void* p, int env_index, int* out) {
+    ((VecHandle*)p)->env->probe(env_index, (int32_t*)out);
+}
+int bcv_last_deaths(void* p, int env_index, int* out, int cap) {
+    return ((VecHandle*)p)->env->last_deaths(env_index, (int32_t*)out, cap);
+}
+int bcv_probe_fields() { return VecEnv::PROBE_FIELDS; }
+
 int bcv_acting_dragon(void* p, int env_index) {
     return ((VecHandle*)p)->env->acting_dragon_id(env_index);
 }

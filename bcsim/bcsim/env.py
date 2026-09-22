@@ -229,6 +229,29 @@ class BattlecodeVecEnv:
             raise ValueError(f"expected {self.num_maps} weights, got {w.shape}")
         _lib.bcv_set_map_weights(ctypes.c_void_p(self._h), w.ctypes.data)
 
+    def probe(self, env_index: int) -> tuple[np.ndarray, np.ndarray]:
+        """What every codec move would do for env_index's acting dragon, tried
+        on a copy of the game: (before, per_move). before = enemy dragons
+        alive, the longest enemy's length, our dragons alive; per_move is
+        (N_MOVES, PROBE_FIELDS), see VecEnv::probe in cpp/bc_vec.hpp."""
+        if not hasattr(_lib, "_probe_ready"):
+            _lib.bcv_probe.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+            _lib.bcv_probe_fields.restype = ctypes.c_int
+            _lib._probe_ready = _lib.bcv_probe_fields()
+        f = _lib._probe_ready
+        out = np.zeros(3 + N_MOVES * f, np.int32)
+        _lib.bcv_probe(ctypes.c_void_p(self._h), env_index, out.ctypes.data)
+        return out[:3], out[3:].reshape(N_MOVES, f)
+
+    def last_deaths(self, env_index: int) -> np.ndarray:
+        """(n, 4) rows (dragon id, reason, killer id or -1, team) of the
+        deaths env_index's last action caused."""
+        _lib.bcv_last_deaths.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+        _lib.bcv_last_deaths.restype = ctypes.c_int
+        out = np.zeros((64, 4), np.int32)
+        n = _lib.bcv_last_deaths(ctypes.c_void_p(self._h), env_index, out.ctypes.data, 64)
+        return out[:min(n, 64)].copy()
+
     def set_potential_gamma(self, gamma: float) -> None:
         """Team potentials become gamma * phi(s') - phi(s); 1 = plain differences."""
         _lib.bcv_set_potential_gamma(ctypes.c_void_p(self._h), float(gamma))
