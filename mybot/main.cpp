@@ -184,22 +184,36 @@ bool forward(obs::Snapshot const& snap, std::int64_t start, std::int64_t* stage_
 
 // Cheap legal move for the first turn, for a budget bail-out, and for when
 // the weights are missing: take a pearl if one is a step away, else go
-// straight on, else anything legal.
+// straight on, else anything legal -- but never walk onto another head.
+//
+// That last rule is not a nicety. Entering a head's cell is legal, and it
+// kills both dragons, so a blind step into one is a trade at best. Every
+// dragon's first turn runs this heuristic (the turn that widens the weights
+// cannot also afford a forward pass), and a split child's first turn is
+// exactly when a friendly head is most likely to be one step away: on
+// Default all four dragons split on round 1 and each child's blind "straight
+// on" took out an ally, six of our eight dragons gone before round 2. It cost
+// a server game 0-12 in two rounds against an opponent that did not
+// reciprocate. v10 and every submission before it did the same.
 int fallback(obs::Snapshot const& snap) {
-    int best = -1;
+    int any = -1, safe = -1;
     std::array<int, 3> dirs{};
     for (int id = 0; id < obs::N_MOVES; id++) {
         if (!mask[id]) continue;
-        if (best < 0) best = id;
+        if (any < 0) any = id;
         if (obs::TABLES.n_steps[id] != 1) continue;
         obs::decode_move(id, snap.facing, dirs);
         int const nx = ((snap.hx + obs::DX[(std::size_t)dirs[0]]) % snap.w + snap.w) % snap.w;
         int const ny = ((snap.hy + obs::DY[(std::size_t)dirs[0]]) % snap.h + snap.h) % snap.h;
         int const cell = snap.cell_of(nx, ny);
-        if (cell >= 0 && snap.tile(cell).pearl) return id;
-        if (id == 0) best = 0;
+        if (cell >= 0) {
+            auto const* part = snap.tile(cell).get_dragon();
+            if (part != nullptr && part->is_dragon_head) continue;   // a trade, not a move
+            if (snap.tile(cell).pearl) return id;
+        }
+        if (safe < 0 || id == 0) safe = id;                          // prefer straight on
     }
-    return best < 0 ? 0 : best;
+    return safe >= 0 ? safe : (any < 0 ? 0 : any);
 }
 
 // The turn's whole answer, sent as one write.
