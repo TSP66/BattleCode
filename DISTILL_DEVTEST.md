@@ -11,14 +11,15 @@ rates to decide.
 |---|---|
 | Better features? | **Yes.** Remembered-map inputs: **+2.9 points** of held-out accuracy over the same pipeline without them, **+4.3** over r3 on games r3 never saw. Round robin: the memory clones beat r3 (r3 last at 0.460 +- 0.016 over 173-192 games per pair); against the frozen anchor field 0.607 vs r3's 0.577 on identical games. |
 | 90% accuracy? | **No: 85.2%** (84.6% on unseen games). See "why not 90". |
-| Super-sprints labelled? | **Yes, 10,751** (0.10% of turns). The clone learns them (42% recall on held-out labels, from 2%) and the sprint outputs are no longer all zeros. |
-| Do super-sprints win more? | **No - they lose.** ft_sprint 0.484 and ft_aggr 0.481 in the round robin (control 0.532), and 0.510 / 0.530 vs the anchors against mm's 0.607. **Cause found:** 99% of super-sprints are head-on, which kills our own dragon too, so weight 10 taught the clone to trade heads: 14x more draws, games 25 rounds shorter. Section 3 has the fix to try. |
+| Super-sprints labelled? | **Yes, 10,751** (0.10% of turns). The clone learns them (42% of held-out labels at weight 10, 14% at the safer weight 3, from 2%) and the sprint outputs are no longer all zeros. |
+| Do super-sprints win more? | **Not yet, but the harm is fixed.** At weight 10 they lose: ft_sprint 0.484 and ft_aggr 0.481 in the round robin (control 0.532), 0.510 / 0.530 vs the anchors against mm's 0.607. **Cause found:** 99% of super-sprints are head-on, which kills our own dragon too, so weight 10 taught head-trading - 14x more draws, games 25 rounds shorter. **Retried** with only the good trades at weight 3 (ft_sprint_good): back to level (0.521 mean vs 0.478 for the weight-10 version on the same three opponents), draws back to 1.4%, and it still plays super-sprints. |
 | Self-traps? | **Counted, not used:** 8,949 (0.083% of turns), below super-sprints (0.099%), as agreed. 64% of candidates turned out to be sacrifices. |
 | Toss-up downweighting? | **Neutral:** 0.524 vs control 0.532, inside noise. |
 
-Nothing here clears the >0.60-against-everything submission bar, so **no upload
-is recommended yet**. The memory features are worth keeping; the sprint
-relabelling needs the fix below before it is worth another run.
+Nothing here clears the >0.60-against-everything submission bar (mm's weakest
+anchors are Sabotage 0.562 and ft6 0.583), so **no upload is recommended yet**.
+Carry forward `mm` (the memory clone) and `ft_sprint_good`; drop the weight-10
+relabelling and the aggressive weighting.
 
 ## 1. What the data says about dev test
 
@@ -130,11 +131,28 @@ kills it), and it is too short to split or its team is full.
   last-dragon sprints trade a median length 3 dragon for their median length 2
   (only 11% trade up), while the longest-dragon ones trade 6 for 7 (53% trade up).
 
-**Fix to try next** (labels already built): `sprint_label_good.npy` keeps the
-game-winning sprints plus the longest-dragon ones that trade up in length -
-6,594 rows - and a weight of 2-3 rather than 10. `sprint_label_surv.npy` keeps
-only the 55 non-suicidal ones, which is too few to train on but is the right
-class if the aim is pressure without losses.
+### The fix, run and measured
+
+`sprint_label_good.npy` keeps only the trades worth making - the game-winning
+sprints, plus the longest-dragon ones where our dragon is shorter than the
+target - 6,594 rows, at weight **3** instead of 10 (**ft_sprint_good**, 2 epochs
+from mm like the others):
+
+| | held-out acc | exact sprint on labels | sprints elsewhere | draws | mean score |
+|---|---|---|---|---|---|
+| ft_control | 85.4 | 2.0% | 0.24% | 0.3% | 0.532 |
+| ft_sprint (all labels, weight 10) | 85.1 | 41.7% | 0.42% | 4.2% | 0.478* |
+| **ft_sprint_good (good trades, weight 3)** | 85.3 | 14.1% | 0.26% | 1.4% | **0.521*** |
+
+\* mean over the same three opponents (ft_control, mm, v10); ft_sprint_good is
+96 games per pair (se ~0.034), the others 173-192.
+
+So the eager version's damage was the labelling, not the idea: at weight 3 on
+good trades the clone still reaches for super-sprints (7x the control's rate on
+labelled turns), sprints as often as dev test does overall (0.26% vs 0.28%), and
+plays level with the control instead of 0.05 below it. `sprint_label_surv.npy`
+keeps only the 55 non-suicidal (pure trapping) sprints - too few to train on, but
+the right class if the aim is pressure without losses.
 
 ## 4. Self-traps (counted, then dropped, as agreed)
 
@@ -187,6 +205,10 @@ to float16 rounding). Two seeds, so 173-192 games per pair.
 | ft_aggr | - | 0.491 | 0.494 | 0.460 | 0.443 | 0.514 | **0.481** | 0.016 |
 | v10 (r3) | 0.486 | 0.414 | 0.464 | 0.443 | 0.495 | - | **0.460** | 0.016 |
 
+Added after the first write-up, 96 games per pair (`rr3.jsonl`, seed 31337):
+**ft_sprint_good** scored 0.474 vs ft_control, 0.562 vs mm, 0.526 vs v10 - mean
+0.521 (se 0.034), against 0.478 for ft_sprint on the same three.
+
 Against the frozen anchors (96 games per opponent; the ft_sprint and ft_aggr
 runs hit a 3h limit, so the comparison below uses only the 32 (opponent, map)
 cells every run finished - 384 games each - because the dropped games are the
@@ -227,10 +249,11 @@ cells; every number here is greedy play on 8 maps.
 
 ## 7. What I would do next, in order
 
-1. **Retry super-sprints properly**: `sprint_label_good.npy` (6,594 rows: wins,
-   plus longest-kills that trade up) at weight 2-3, against a fresh control.
-   Keeping the sprint head non-zero is valuable for later RL even if the clone
-   itself does not improve, which was the original reason for asking.
+1. **Confirm ft_sprint_good with more games** (it has 96 per pair against three
+   opponents) and against the anchors, which is where ft_sprint's damage showed
+   up most clearly. If it holds level, it is the variant to carry forward: the
+   sprint head is non-zero, which was the original reason for asking, at no cost
+   in win rate.
 2. **Attack left/right, not features.** It is the whole remaining gap and no
    input I added moves it much past 82%. Options: predict the *world-frame*
    direction instead of the ego-frame turn (the symmetric-window evidence says
@@ -258,7 +281,7 @@ cells; every number here is greedy play on 8 maps.
 | `bcsim/train/tossup.py` | toss-up detection and weights |
 | `bcsim/train/clone_eval.py`, `round_robin.py`, `clone_report.py`, `sprint_report.py`, `collect_results.py` | evaluation |
 | `bcsim/cpp/bc_vec.hpp` | `VecEnv::probe`, `free_area`, `trapped`, `last_deaths` |
-| `runs/i2/*/best.pt`, `log.jsonl` | the clones |
+| `runs/i2/*/best.pt`, `log.jsonl` | the clones (`full_mem_memfar` = mm, `ft_sprint_good` = the fixed sprint variant) |
 | `runs/evals/*.jsonl`, `summary.json` | every game result quoted here |
 
 ## Reproduce
