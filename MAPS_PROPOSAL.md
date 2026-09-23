@@ -66,7 +66,7 @@ Ten, each aimed at one gap, none a variant of an existing map (`augment.py` alre
 | `glut` | 24x24 | xy | 2 | 100% pearls, respawn 1-5. The opposite extreme |
 | `duel` | 20x20 | xy | **1** | One dragon a side, length 6. Gap 2: no split partner |
 | `hive` | 48x48 | xy | **6** | Six short dragons a side. Gap 2: swarm at the unit cap |
-| `corridor` | 64x8 | y | 3 | 8:1 aspect. Gap 6 |
+| `corridor` | 64x16 | y | 3 | 4:1 aspect, double the current maximum. Gap 6 |
 | `wormhole` | 32x32 | xy | 2 | ~60 portals as the main structure. Gap 3 |
 | `choke` | 40x20 | y | 3 | One kelp wall, two gaps. Gap 7: forced contention |
 | `ring` | 36x36 | xy | 3 | Solid kelp donut; play circulates. Gap 7 |
@@ -74,6 +74,20 @@ Ten, each aimed at one gap, none a variant of an existing map (`augment.py` alre
 | `capped` | 32x32 | xy | 4 | `UNIT_LIMIT 8`. Gap 1, the untouched rule |
 
 `drift` being asymmetric is fair in aggregate because every eval plays both sides of every map.
+
+### Hard constraint: both dimensions above 10
+
+The user, 2026-09-23: official maps always exceed 10 in every dimension. The data agrees --
+`arena` at 11x11 is the smallest official map, and the **live** seven bottom out at 16 (`devil`
+32x16, `default_small` and `colosseum` 16x16). `corridor` was 64x8 in the first draft, which broke
+this; it is now 64x16, which keeps 4:1 aspect (double the current maximum) while staying inside
+the shapes the server actually serves. Every other proposed map was already inside the rule.
+
+**This also indicts a map we are training on right now.** `maps/small.map` is **16x8** -- a local
+invention, not an official map, and the only map in `maps/` that breaks the rule. As things stand
+it is 1/12 of the PPO training pool, i.e. ~8% of training spent on a shape the server will never
+serve. Recommend dropping it from the pool, or at minimum giving it a low weight once the
+weighting knob exists.
 
 ## How to build it
 
@@ -96,6 +110,6 @@ put the live 7 at **7/22 = 32%** of training. That is almost certainly too littl
 are actually scored on. The fix is a per-map weight multiplier in `build_pool`, which it does not
 have today (flagged on 2026-09-23, deliberately not written while the ratchet was running).
 
-**Build the weighting knob first, then the maps.** A sensible starting split is live 7 at ~60% of
-sampling, the rest sharing 40%. Without the knob, adding these maps is likely to cost ladder
-strength rather than add robustness.
+**Build the weighting knob first, then the maps.** The user approved **60/40** on 2026-09-23: the
+live 7 take 60% of sampling, everything else shares 40%. Without the knob, adding these maps is
+likely to cost ladder strength rather than add robustness.

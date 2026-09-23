@@ -74,6 +74,13 @@ def parse() -> argparse.Namespace:
     p.add_argument("--gen", type=int, default=0)
     p.add_argument("--segment", type=int, default=0)
     p.add_argument("--maps", default=str(ROOT / "runs/ft3/maps"))
+    p.add_argument("--live-maps", default="",
+                   help="directory of the maps the ladder is played on; with --live-share, "
+                        "they take that share of sampling and every other map in --maps shares "
+                        "the rest. Empty (the default) weights every base map equally.")
+    p.add_argument("--live-share", type=float, default=0.0,
+                   help="0 = off. 0.6 keeps the live maps at 60%% of training when --maps holds "
+                        "invented maps as well (see MAPS_PROPOSAL.md)")
     p.add_argument("--envs", type=int, default=1024)
     p.add_argument("--steps", type=int, default=256)
     p.add_argument("--threads", type=int, default=16)
@@ -89,6 +96,9 @@ def parse() -> argparse.Namespace:
     p.add_argument("--aug-per-map", type=int, default=48)
     p.add_argument("--aug-original-share", type=float, default=0.25)
     p.add_argument("--calib-share", type=float, default=1 / 32)
+    p.add_argument("--explore", type=float, default=0.0,
+                   help="share of the learner's sampling spread uniformly over legal "
+                        "actions (see the note at the sampling site)")
     return p.parse_args()
 
 
@@ -146,8 +156,14 @@ def main() -> None:
           flush=True)
 
     # ---- env
-    texts, map_w, _, _ = augment.build_pool(a.maps, a.aug_per_map, a.seed, 0.0,
-                                            a.aug_original_share)
+    texts, map_w, map_names, _ = augment.build_pool(a.maps, a.aug_per_map, a.seed, 0.0,
+                                                    a.aug_original_share)
+    if a.live_maps and a.live_share > 0:
+        live = {f.stem for f in pathlib.Path(a.live_maps).glob("*.map")}
+        map_w = augment.set_group_share(map_w, map_names, live, a.live_share)
+        held = sorted(set(map_names) - live)
+        print(f"map sampling: {len(live & set(map_names))} live maps at {a.live_share:.0%}, "
+              f"{len(held)} others at {1 - a.live_share:.0%} ({', '.join(held)})", flush=True)
     env = bcsim.BattlecodeVecEnv(texts, num_envs=a.envs, num_threads=a.threads, seed=a.seed,
                                  closure_capacity=max(8192, a.envs * 160), privileged=True)
     env.set_map_weights(map_w)
@@ -219,7 +235,21 @@ def main() -> None:
             learn = (learner < 0) | (obs.team == learner)
             with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
                 logits, _ = policy(staged[0], staged[1])
-                action, logp, _ = policy_out(logits, staged[2])
+                if a.explore > 0:
+                    # Behaviour = (1 - eps) * policy + eps * uniform over legal moves.
+                    # The recorded logp is the POLICY's, not the mixture's: an exact
+                    # importance weight (pi / mixture ~ 1e-6 / 5e-4 for a dead action,
+                    # e.g. gen0's 3-step sprints) would scale its gradient to nothing,
+                    # so it could never come back. This biases updates toward the
+                    # tried actions, bounded by the PPO clip on each step.
+                    lm = masked_logits(logits.float(), staged[2])
+                    logp_all = torch.log_softmax(lm, dim=1)
+                    legal = (lm > -1e8).float()
+                    q = (1 - a.explore) * logp_all.exp() + a.explore * legal / legal.sum(1, keepdim=True)
+                    action = torch.multinomial(q, 1).squeeze(1)
+                    logp = logp_all.gather(1, action.unsqueeze(1)).squeeze(1)
+                else:
+                    action, logp, _ = policy_out(logits, staged[2])
                 for k, onet in enumerate(opps):
                     rows = torch.from_numpy(~learn & (slot == k + 1)).to(dev)
                     if rows.any():
@@ -356,7 +386,7 @@ def main() -> None:
         cand = done0 + (it + 1) * turns_per_iter
         total = a.turn_base + (it + 1) * turns_per_iter
         row = {"gen": a.gen, "segment": a.segment, "iter": it, "total_turns": total,
-               "cand_turns": cand, "lr": a.lr,
+               "cand_turns": cand, "lr": a.lr, "explore": a.explore,
                "sps": turns_per_iter / (t_roll + t_opt), "t_roll": round(t_roll, 2),
                "t_opt": round(t_opt, 2), "usable": round(n / turns_per_iter, 3),
                "orphans": roll.orphans, "overwrites": roll.overwrites,

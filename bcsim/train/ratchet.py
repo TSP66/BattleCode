@@ -196,6 +196,8 @@ class Supervisor:
                 "--out", str(out), "--games", str(self.a.games),
                 "--anchor-reps", str(self.a.anchor_reps), "--seed", str(self.s["seed"] * 7 + 3),
                 "--max-seconds", str(self.a.gate_seconds)]
+        if getattr(self.a, "gate_maps", ""):
+            args += ["--maps", self.a.gate_maps]
         if anchor:
             args += ["--anchor", anchor]
         for attempt in range(3):
@@ -255,7 +257,8 @@ class Supervisor:
         if c.get("segment_done") == s["segment"] and final.exists():
             return "ok"
         names, paths, w = self.weights()
-        target = (s["segment"] + 1) * self.a.segment_turns
+        # per candidate: ones created before this was stored ran 50M segments
+        target = (s["segment"] + 1) * c.get("seg_turns", 50_000_000)
         for attempt in range(3):
             latest = cdir / "latest.pt"
             if latest.exists():
@@ -276,7 +279,11 @@ class Supervisor:
                     "--seed", str(s["seed"] * 1000 + s["segment"] * 10 + attempt),
                     "--opponents", ",".join(paths), "--opp-names", ",".join(names),
                     "--opp-weights", ",".join(f"{x:.4f}" for x in w),
-                    "--self-frac", str(self.a.self_frac), "--kl-coef", str(self.a.kl_coef)]
+                    "--self-frac", str(self.a.self_frac), "--kl-coef", str(self.a.kl_coef),
+                    *(["--maps", self.a.train_maps] if self.a.train_maps else []),
+                    *(["--live-maps", self.a.live_maps, "--live-share", str(self.a.live_share)]
+                      if self.a.live_maps and self.a.live_share > 0 else []),
+                    "--explore", str(c.get("explore", 0.0))]
             if cont:
                 args.append("--continue")
             if final.exists():
@@ -319,7 +326,10 @@ class Supervisor:
             if s["cand"] is None:
                 cdir = self.run / "cands" / f"g{s['gen']:03d}_s{s['seed']}"
                 s["cand"] = {"dir": str(cdir), "init": s["anchor"], "cont": False,
-                             "turns_before": 0, "turns_before_exp": s["turns"]}
+                             "turns_before": 0, "turns_before_exp": s["turns"],
+                             # fixed per candidate, so an extension keeps its settings
+                             "explore": self.a.explore,
+                             "seg_turns": self.a.segment_turns}
                 s["segment"] = 0
                 self.save()
             status = self.train_segment()
@@ -412,7 +422,8 @@ def main() -> None:
     r = sub.add_parser("run")
     r.add_argument("--run", default=str(ROOT / "runs/ratchet"))
     r.add_argument("--start", default=str(ROOT / "runs/ft6/snapshots/turns_112721920.pt"))
-    r.add_argument("--segment-turns", type=int, default=50_000_000)
+    r.add_argument("--segment-turns", type=int, default=100_000_000,
+                   help="turns per segment for NEW candidates (~48 min at 35k turns/s)")
     r.add_argument("--max-segments", type=int, default=3)
     r.add_argument("--promote", type=float, default=0.55)
     r.add_argument("--extend-min", type=float, default=0.48)
@@ -423,10 +434,19 @@ def main() -> None:
     r.add_argument("--lr-patience", type=int, default=2)
     r.add_argument("--kl-coef", type=float, default=0.5)
     r.add_argument("--self-frac", type=float, default=0.2)
+    r.add_argument("--explore", type=float, default=0.0,
+                   help="uniform-exploration share for NEW candidates (ratchet_train --explore)")
     r.add_argument("--games", type=int, default=12, help="gate games per (opponent, map)")
     r.add_argument("--anchor-reps", type=int, default=4, help="anchor played this many times over")
     r.add_argument("--gate-seconds", type=float, default=3600)
     r.add_argument("--keep-anchors", type=int, default=3, help="past anchors kept in the league")
+    # map supply. Training may use a wider pool than the ladder is played on (see
+    # MAPS_PROPOSAL.md); gating stays on the live rotation, so a gate score always
+    # means "strength on the maps we are scored on".
+    r.add_argument("--train-maps", default="", help="map pool for training; empty = ratchet_train's default")
+    r.add_argument("--live-maps", default="", help="with --live-share, the maps to hold at that share")
+    r.add_argument("--live-share", type=float, default=0.0, help="0 = every base map weighted equally")
+    r.add_argument("--gate-maps", default="", help="maps the gate plays on; empty = the gate's default")
     g = sub.add_parser("gate")
     g.add_argument("--cand", required=True)
     g.add_argument("--anchor", default="")

@@ -562,6 +562,36 @@ def reweight(weights: np.ndarray, areas: np.ndarray, alpha_from: float,
     return weights * (256.0 / areas) ** (alpha_to - alpha_from)
 
 
+def set_group_share(weights: np.ndarray, names: list[str], group: set[str],
+                    share: float) -> np.ndarray:
+    """Rescale so the base maps in `group` take `share` of the pool together.
+
+    build_pool weights every base map equally, so adding maps of our own dilutes
+    the ones the ladder is actually played on: twelve maps put the live seven at
+    7/12, and ten invented maps on top would put them at 7/22. This keeps the
+    relative weights inside each side untouched and only moves the split between
+    them, so `share` is exactly the probability of drawing a group map.
+
+    Returns a copy, normalised to sum to 1. A group that is empty or that is the
+    whole pool is returned normalised and otherwise untouched, since there is no
+    split to set.
+    """
+    if not 0.0 <= share <= 1.0:
+        raise ValueError(f"share must be in [0, 1], got {share}")
+    w = np.asarray(weights, dtype=np.float64).copy()
+    total = w.sum()
+    if total <= 0:
+        raise ValueError("pool weights sum to zero")
+    w /= total
+    inside = np.array([n in group for n in names])
+    win, wout = w[inside].sum(), w[~inside].sum()
+    if win <= 0 or wout <= 0:          # nothing to split
+        return w
+    w[inside] *= share / win
+    w[~inside] *= (1.0 - share) / wout
+    return w
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--maps", default=str(ROOT / "maps"))
