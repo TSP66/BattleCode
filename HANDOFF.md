@@ -1,21 +1,65 @@
-# Handoff — 2026-09-23 ~13:15: ratchet3 RUNNING (memory, 23 maps, fresh critic)
+# Handoff — 2026-09-23 ~18:15: ratchet4 RUNNING, gen1 PROMOTED
 
 ## Running now
 ```
-runs/ratchet3/launch.sh   (setsid, supervisor.out / ratchet.log)
+runs/ratchet4/launch.sh   (setsid, supervisor.out / ratchet.log)
   seed        runs/i2/sponge_2110/best.pt  (= v13)
-  train maps  maps-all   23 maps, live NINE held at 60% (--live-share 0.6)
-  gate maps   maps-live   9 maps -- a gate score still means ladder strength
-  league      gen4 (frozen), devtest_2050, v12, v10, sabotage, shink_r1
-  critic      runs/team_critic/pretrained.pt  (refit, see below)
+  lr 1e-4   kl-coef 0.4   extend-min 0.45   max-drop 0.15   segment 150M
+  train maps  maps-all   23 maps, live NINE held at 60%
+  gate maps   maps-live   9 maps
+  league      gen4, devtest_2050, v12, v10, sabotage, shink_r1, + gen0 after promotion
+  critic      runs/team_critic/pretrained.pt
 ```
-`maps-all/` is derived and gitignored: `cp maps/*.map maps-gen/*.map maps-all/`.
-Stop with `touch runs/ratchet3/STOP` (exits at the next decision point, i.e. end of a
-150M-turn segment) or `kill -- -$(cat runs/ratchet3/supervisor.pid)` for immediate.
-Dashboard: `.venv-train/bin/python -m train.dash --run runs/ratchet3 --port 8770 --host 0.0.0.0`.
+Stop: `touch runs/ratchet4/STOP` (end of segment) or `kill -- -$(cat runs/ratchet4/supervisor.pid)`.
+A supervisor restart is LOSSLESS mid-segment: `train_segment` resumes from
+`cands/<gen>/latest.pt` using the candidate's own turn counter (cost ~0.3M turns).
+That is the only way to change promote/extend thresholds, which are parsed once at launch.
 
-**ratchet2 was stopped 15 min into gen 1** (kept at `runs/ratchet2_abandoned`) because two
-new maps were published and an env fixes its map list at construction. Nothing was lost.
+## gen1 history
+```
+  seg0  150M  vs_anchor 0.539  -> EXTEND
+  seg1  300M  vs_anchor 0.569  -> PROMOTE   (anchors/gen1.pt)
+```
+Earlier runs for comparison: ratchet3 (lr 3e-5, KL 0.5) sat at vs_anchor 0.50 for
+128M turns and was abandoned; ratchet2 was stopped for the new maps.
+
+## THE GATE DOES NOT MEASURE THE LADDER
+gen1 seg1 beat the anchor better than seg0 and beat the LEAGUE worse:
+```
+                 seg0     seg1(promoted)
+  gen4          0.676     0.574
+  devtest_2050  0.556     0.435
+  shink_r1      0.574     0.537
+  v12           0.537     0.556
+  sabotage      0.620     0.639
+  v10           0.657     0.657
+  league mean   0.603     0.566     (-0.037, ~1.9 se over 648 games)
+  vs_anchor     0.539     0.569
+```
+Promotion is on `vs_anchor` + a per-member `--max-drop`; the league mean is not
+checked. **Read the league mean from every gate JSON.** Both checkpoints survive as
+`cands/g001_s1/seg0.pt` and `seg1.pt`. Before any submission, round-robin rather than
+trusting the gate. Candidate fix: add a "league mean must not fall" condition.
+
+## Next-run queue (NOT applied)
+1. **Maze generator in mapgen.py.** stronghold is 0.083 and did not move in 300M
+   turns; it is the largest pool of unclaimed ladder points. See [[maze maps]] below.
+2. **Critic refit** on a corpus including long maze-type games. `calib_ev` decays to
+   ~0.01 by the end of every segment.
+3. **Retune glut and famine.** Pearl supply per 1000 tile-rounds: glut 333 vs the
+   richest official map (devil) at 38; famine 0.17 vs the sparsest official (default)
+   at 1.54. Nothing is randomised - every value is a hardcoded constant - but those two
+   are outside anything the organisers ship. Suggest glut ~40, famine ~1.0.
+4. **Log the 500-round-game fraction** per iteration, so `calib_ev` decay can be
+   attributed instead of guessed.
+
+## calib_ev is not readable mid-segment
+It resets with the resolved-game pool at every segment boundary AND every supervisor
+restart, then decays the same way each time (0.50 -> ~0.01). Verified three times,
+including an accidental controlled repeat at the 15:01 restart. Always quote
+`calib_n` next to it. The decay is composition (long near-coin-flip games fill the
+pool and a 500-round game deposits into EVERY round bucket), not policy drift -
+`klT` is only 0.007, so the policy has barely moved.
 
 ## THE MAZE MAPS (stronghold, trauma -- published 2026-09-23, both 48x24)
 These are a game mode the old rotation did not contain. Path distance from a team-0 spawn
