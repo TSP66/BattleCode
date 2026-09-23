@@ -541,6 +541,14 @@ struct Game {
         const int limit = m.w + m.h;
         stats[ST_SONAR_CAST]++;
         int x = d.head() % m.w, y = d.head() / m.w;
+        // The ray steps out through the sender's own body without seeing it, and
+        // once clear of it the body becomes an ordinary target again -- which
+        // matters on a torus, where a ray with nothing in its way comes back
+        // round and hits the dragon that sent it. Measured both ways against the
+        // engine: stopping at the body immediately gets the backward ray wrong,
+        // never stopping at it gets the forward ray wrong (which then finds
+        // nothing at all on an open map), and this gets both.
+        bool clear_of_self = false;
         for (int i = 1; i <= limit; i++) {
             int nx, ny;
             if (!tile_after_step(m, x, y, facing, nx, ny)) {
@@ -560,7 +568,9 @@ struct Game {
             // sender's own body and the sender receives its own message, which
             // is what tests/test_vecenv.py checks against the engine. So this is
             // one of the things 1.0.0 changed, not a rule we had wrong before.
-            if (occ >= 0 && !(occ == di && d.protocol >= 3)) {
+            if (occ >= 0 && occ == di && d.protocol >= 3 && !clear_of_self) continue;
+            if (occ != di) clear_of_self = true;
+            if (occ >= 0) {
                 if (occ == di) stats[ST_SONAR_SELF]++;
                 stats[ST_SONAR_HIT]++;
                 const bool head = head_at[m.idx(x, y)] != 0;
