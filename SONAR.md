@@ -111,15 +111,25 @@ Single-ray readings due north, 1607 turns: kelp 1106, ally body 260, ally head
 
 ## The sender's own body
 
-**Under protocol 3 it is transparent.** A ray runs straight through the
-dragon's own segments: it neither stops there nor delivers a message. A dragon
-whose southward ray runs down its own tail is told `ECHOES 4 0 0 0 0` (four
-kelp), where counting the tail would have given `3 1 0 0 0`.
+**The ray steps out through it, and then it counts again.** Neither of the two
+obvious rules is right. Measured on `big_empty`, which has no kelp at all, one
+ray per turn, by direction (N is forward, S is straight back down the tail):
 
-**Under the legacy protocol it is not.** There the ray stops on the sender's own
-body and the sender receives its own message. `tests/test_vecenv.py` checks the
-legacy path against the engine and fails if this is changed, so it is one of the
-things 1.0.0 altered rather than something we had wrong.
+| rule | N | E | S | W |
+|---|---|---|---|---|
+| stop at own body immediately | 0 | 0 | **2974** | 0 |
+| never stop at own body | **2992** | **622** | **2992** | **622** |
+| leave it, then it counts | **0** | **0** | 18 | **0** |
+
+The kelp-free map is what made this visible: on an open torus a ray with nothing
+in its way travels the whole way round and comes back to the dragon that sent
+it. Stopping immediately gets the backward ray wrong; never stopping gets the
+forward ray wrong, and that ray then finds nothing at all and reports an empty
+echo where the engine reports an ally.
+
+The legacy protocol does none of this -- there the ray stops on the sender's own
+body at once and the sender receives its own message. `tests/test_vecenv.py`
+checks the legacy path against the engine and fails if that is changed.
 
 ## Who receives
 
@@ -130,40 +140,42 @@ on a dragon (counted from the echoes) and exactly 501 messages were received.
 
 `tests/parity_sonar.py` drives the engine and our simulator in lockstep and
 compares every block. The legacy protocol is **byte-identical** on every map
-tried. Under protocol 3, driving *one* ray per turn instead of four makes the
-residual legible -- with four, the echo is a direction-less aggregate and cannot
-see a ray going the wrong way:
+tried. Under protocol 3, driving one ray per turn instead of four localises what
+is left -- with four, the echo is a direction-less aggregate and cannot see a ray
+going the wrong way:
 
-| ray direction | turns | echo mismatches |
-|---|---|---|
-| along the dragon's own facing | 1611 | **0** |
-| fixed N | 1611 | 144 |
-| fixed E | 1611 | 121 |
-| fixed S | 1611 | 141 |
-| fixed W | 1611 | 126 |
+| map | kelp edges | N | E | S | W | turns |
+|---|---|---|---|---|---|---|
+| big_empty | 0 | 0 | 0 | 18 | 0 | 3000 |
+| default_small | 72 | 111 | 121 | 109 | 126 | 1611 |
+| arena | 44 | 10 | 15 | 17 | 5 | 82 |
 
-So the geometry, the stopping rules and the echo categories are **exactly right
-whenever the ray runs straight ahead**, and about 9% wrong when it runs anywhere
-else. The mismatches are lopsided: mostly we report `kelp` where the engine
-reports a hit on a head, so the engine's ray reaches something ours has already
-stopped at.
+**Without kelp we are essentially exact; with kelp we are about 7% out.** So
+what remains is the ray's interaction with kelp, not its geometry, not its
+treatment of the sender, and not the echo categories. The mismatches are almost
+entirely one shape: we report `kelp` where the engine reports a dragon
+(ours kelp -> engine ally_head x104, ours kelp -> engine ally x103).
 
-Message *timing* is also not reproduced: aggregate counts agree, but individual
-messages land a round out on about half the turns of a small map.
+Message timing inherits the same residual, and aggregate message counts agree.
 
-Tested and **wrong**, recorded so they are not tried again:
+Hypotheses tested and **rejected**, recorded so they are not tried again:
 
-- reading the direction letter in the dragon's own frame rather than as a
-  compass bearing (triples the mismatches, and breaks the facing case which is
-  currently exact -- that exactness is itself the evidence for absolute, since
-  the two readings agree there and nowhere else);
-- letting a ray hit the sender's own head after wrapping while still passing
-  through its body (no change at all);
-- casting from the pre-move rather than the post-move position;
+- reading the direction letter in the dragon's own frame rather than as a compass
+  bearing -- triples the mismatches, and breaks the forward-ray case which is
+  exact (that exactness is itself the evidence for absolute, since the two
+  readings agree there and nowhere else);
+- the ray reflecting off kelp and continuing back -- much worse
+  (823/791/1182/1242 on default_small);
+- a dragon on the far side of a kelp edge still being heard -- worse
+  (293/121/309/466);
+- a ray hitting the sender's own head after wrapping while passing through its
+  body -- no change;
+- casting from the pre-move rather than the post-move position -- worse;
 - three different models of when an inbox is cleared.
 
-**So the echo path is safe to train on and the message path is not**, which
-matters because the parent-to-child memory codec rides on the message path.
+**So the echo path is safe to train on, and the message path is safe only on maps
+without kelp**, which matters because the parent-to-child memory codec rides on
+the message path.
 
 ## Still unmeasured
 
