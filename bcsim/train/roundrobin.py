@@ -141,7 +141,13 @@ def main() -> None:
     acts, archs = {}, {}
     for name, path in agents:
         net, ck = load_net(path, dev)
-        acts[name] = greedy(net, dev)
+        if getattr(net, "recurrent", False):
+            # a recurrent policy cannot go through greedy; it keeps a state per
+            # dragon and implements evaluate's stateful contract instead
+            from train.recurrent import RecurrentGreedy
+            acts[name] = RecurrentGreedy(net, dev, n_envs, per_env=256)
+        else:
+            acts[name] = greedy(net, dev)
         archs[name] = ck["args"].get("arch", "flat")
         print(f"  {name:28s} {archs[name]:8s} "
               f"{sum(q.numel() for q in net.parameters()):,} params", flush=True)

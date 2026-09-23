@@ -206,16 +206,27 @@ class StatePool:
         self.prev_y = np.zeros(self.n, np.int32)
         self.prev_face = np.zeros(self.n, np.int8)
         self.fresh = np.zeros(self.n, bool)              # no previous turn yet
+        # when each slot last had a turn, so a full pool can evict the dragon
+        # that has been silent longest rather than refuse a live one
+        self.last_used = np.full(self.n, -1, np.int64)
+        self.tick = 0
         self.evictions = 0
         self.exhausted = 0
 
     def _take(self, env: int, uid: int) -> int:
         if not self.free:
-            # Should not happen with per_env at the unit limit, but a full pool
-            # must not corrupt another dragon's memory: drop this one's instead.
+            # Nothing frees a slot when a dragon dies mid-game: closures are not
+            # visible here and an episode may run 500 rounds of splits and
+            # deaths, so occupancy climbs well past the live population. A full
+            # pool is not a harmless condition -- a dragon gets no state and,
+            # through it, no sensible action -- so the least recently used slot
+            # is taken instead of refusing. It belongs to whichever dragon has
+            # gone longest without a turn, which is the one most likely dead.
+            victim = int(np.argmin(self.last_used))
             self.exhausted += 1
-            return -1
+            self.release_slot(victim)
         s = self.free.pop()
+        self.last_used[s] = self.tick
         ids = uid & ID_MASK
         self.slot[env, ids] = s
         self.slot_uid[env, ids] = uid
@@ -228,6 +239,7 @@ class StatePool:
 
     def slots_for(self, envs: np.ndarray, uids: np.ndarray) -> np.ndarray:
         """Slot per row, allocating for a dragon seen for the first time."""
+        self.tick += 1
         ids = (uids & ID_MASK).astype(np.int64)
         have = self.slot[envs, ids]
         stale = (have >= 0) & (self.slot_uid[envs, ids] != uids)
@@ -236,6 +248,7 @@ class StatePool:
         out = np.where(stale, -1, have)
         for k in np.flatnonzero(out < 0):
             out[k] = self._take(int(envs[k]), int(uids[k]))
+        self.last_used[out[out >= 0]] = self.tick
         return out
 
     def release_slot(self, s: int) -> None:
@@ -247,6 +260,7 @@ class StatePool:
             self.slot[env, ids] = -1
         self.owner[s] = -1
         self.owner_env[s] = -1
+        self.last_used[s] = -1
         self.free.append(s)
         self.evictions += 1
 
