@@ -1,0 +1,14 @@
+waiting for selfplay...
+selfplay done: 390 invented-map games
+=== refit on replays + invented-map games ===
+2026-09-23T12:26:56+09:30
+3229 games: 2,366,737 train positions, 270,024 held out (342 games)
+outcome share (train) win/draw/loss [0.609 0.    0.391]
+{"epoch": 0, "train_ce": 0.5295, "val_ll": 0.4134, "baseline_ll": 0.6709, "acc": 0.8143, "ev_r0": 0.2851, "ev_r100": 0.3928, "ev_r200": 0.5429, "ev_r300": 0.5209, "ev_r400": 0.5236, "ece_win": 0.0247, "ev": 0.4615, "elapsed": 52}
+{"epoch": 1, "train_ce": 0.4675, "val_ll": 0.4357, "baseline_ll": 0.6709, "acc": 0.8053, "ev_r0": 0.2929, "ev_r100": 0.3635, "ev_r200": 0.5036, "ev_r300": 0.464, "ev_r400": 0.5032, "ece_win": 0.0181, "ev": 0.4312, "elapsed": 104}
+{"epoch": 2, "train_ce": 0.4352, "val_ll": 0.4501, "baseline_ll": 0.6709, "acc": 0.8083, "ev_r0": 0.3134, "ev_r100": 0.3737, "ev_r200": 0.4945, "ev_r300": 0.437, "ev_r400": 0.5205, "ece_win": 0.0312, "ev": 0.4317, "elapsed": 155}
+{"epoch": 3, "train_ce": 0.4103, "val_ll": 0.4713, "baseline_ll": 0.6709, "acc": 0.8045, "ev_r0": 0.3102, "ev_r100": 0.352, "ev_r200": 0.4883, "ev_r300": 0.4236, "ev_r400": 0.5153, "ece_win": 0.0366, "ev": 0.421, "elapsed": 207}
+{"epoch": 4, "train_ce": 0.3926, "val_ll": 0.4721, "baseline_ll": 0.6709, "acc": 0.8063, "ev_r0": 0.3023, "ev_r100": 0.355, "ev_r200": 0.4947, "ev_r300": 0.4265, "ev_r400": 0.5199, "ece_win": 0.0426, "ev": 0.4234, "elapsed": 258}
+{"epoch": 5, "train_ce": 0.3835, "val_ll": 0.4787, "baseline_ll": 0.6709, "acc": 0.8043, "ev_r0": 0.2981, "ev_r100": 0.3495, "ev_r200": 0.485, "ev_r300": 0.4239, "ev_r400": 0.5184, "ece_win": 0.0414, "ev": 0.4184, "elapsed": 310}
+best held-out log loss 0.4134 -> /home/thomaspetty/BattleCode/runs/team_critic/pretrained.pt
+2026-09-23T12:32:15+09:30

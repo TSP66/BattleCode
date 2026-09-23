@@ -1,0 +1,6 @@
+replay (real server play): 314 games, 223,155 positions
+invented maps (self-play): 28 games, 46,869 positions
+
+critic                              replay (real server pl  invented maps (self-pl
+pretrained_pre20260923.pt              ev 0.507  ll 0.3866   ev -0.0801  ll 0.7825
+pretrained.pt                         ev 0.5135  ll 0.3773    ev 0.2199  ll 0.5842
