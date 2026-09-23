@@ -108,8 +108,14 @@ def load(path: str, dev, n_context: int | None = None):
     ck = torch.load(path, map_location=dev, weights_only=False)
     c = ck["critic_args"]
     nc = n_context or c["n_context"]
-    net = build(bcsim.N_CHANNELS, bcsim.N_SCALARS, nc, c["width"], c["blocks"]).to(dev)
     sd = ck["critic"]
+    # Size the scalar branch from the checkpoint, not from the env. bcsim's row
+    # is 708 wide now (bc_memory.hpp) while this critic was pretrained on the
+    # base 14, and it is frozen, so it keeps taking the 14 it knows -- callers
+    # pass scalar[:, :n_scalars]. Building it at the env's width instead would
+    # just fail to load.
+    n_scalars = sd["scalar.0.weight"].shape[1]
+    net = build(bcsim.N_CHANNELS, n_scalars, nc, c["width"], c["blocks"]).to(dev)
     if nc != c["n_context"]:
         sd = {k: v for k, v in sd.items() if not k.startswith("self_v.")}
         # the context columns of the first global layer start at zero weight
