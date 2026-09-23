@@ -159,7 +159,8 @@ class BattlecodeVecEnv:
     def __init__(self, maps: list[str], num_envs: int = 64, num_threads: int = 8,
                  seed: int = 0, egocentric: bool = True, random_pearl_seed: bool = True,
                  max_rounds: int = 500, closure_capacity: int | None = None,
-                 privileged: bool = False, board: bool = False, wide: bool = False):
+                 privileged: bool = False, board: bool = False, wide: bool = False,
+                 sonar: bool = False):
         if not maps:
             raise ValueError("need at least one map")
         blob = b"".join(m.encode() for m in maps)
@@ -170,6 +171,18 @@ class BattlecodeVecEnv:
                                   err, 512)
         if not self._h:
             raise ValueError(err.value.decode())
+        if sonar:
+            # Every dragon broadcasts in all four directions each turn and
+            # speaks protocol 3, so the echo scalars carry something. Off by
+            # default: a broadcast changes what the opponent sees through
+            # SC_NUM_MSGS, so turning it on silently would make the frozen
+            # league play differently.
+            if not hasattr(_lib, "bcv_set_sonar"):
+                raise RuntimeError(f"{_LIB_PATH.name} has no sonar export; "
+                                   "rebuild with `make -C bcsim`")
+            _lib.bcv_set_sonar.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            _lib.bcv_set_sonar(ctypes.c_void_p(self._h), 1)
+        self.sonar = sonar
         self.num_envs = num_envs
         self.num_actions = N_ACTIONS
 

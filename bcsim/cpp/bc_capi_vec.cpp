@@ -54,6 +54,11 @@ void* bcv_create(const char* maps_blob, const int* map_lengths, int num_maps,
 
 void bcv_bind_priv(void* p, float* priv) { ((VecHandle*)p)->env->bind_priv(priv); }
 int bcv_priv_count() { return PRIV_COUNT; }
+// Broadcast sonar in all four directions every turn and speak protocol 3.
+// A setter rather than another bcv_create argument: the signature is shared
+// with the replay and privileged builds and with every existing caller.
+void bcv_set_sonar(void* p, int on) { ((VecHandle*)p)->env->set_sonar(on != 0); }
+
 void bcv_bind_board(void* p, uint8_t* board) { ((VecHandle*)p)->env->bind_board(board); }
 void bcv_board_shape(int* out) { out[0] = BOARD_CH; out[1] = BOARD_MAX; }
 

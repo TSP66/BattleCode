@@ -30,9 +30,14 @@ N_BASE, N_MEM, N_FAR = 14, 676, 18
 
 
 def main() -> None:
-    if bcsim.N_SCALARS != N_BASE + N_MEM + N_FAR:
-        raise SystemExit(f"this build gives {bcsim.N_SCALARS} scalars, not 708 -- "
-                         "point BCSIM_LIB at a memory build")
+    # The memory block must still be exactly where it was. The row is allowed to
+    # be longer -- features are appended on the end, the sonar echoes were the
+    # first -- but everything in [0, 708) has to stay put, which is what lets the
+    # frozen league keep playing. Anything shorter is not a memory build.
+    if bcsim.N_SCALARS < N_BASE + N_MEM + N_FAR:
+        raise SystemExit(f"this build gives {bcsim.N_SCALARS} scalars, fewer than the "
+                         "708 the memory features need -- point BCSIM_LIB at a "
+                         "memory build")
     root = pathlib.Path(__file__).resolve().parents[2]
     names = ["default_small", "devil", "queen_of_spades", "schooltime", "big_empty", "trophy"]
     texts = [(root / "maps" / f"{n}.map").read_text() for n in names]
@@ -58,7 +63,8 @@ def main() -> None:
             got = tr.step(keys, obs.local, obs.scalar[:, :N_BASE], obs.round,
                           want=["mem", "memfar"])
             want = np.concatenate([got["mem"], got["memfar"]], 1).astype(np.float32)
-            have = obs.scalar[:, N_BASE:]
+            # exactly the memory block; anything appended after it is not ours
+            have = obs.scalar[:, N_BASE:N_BASE + N_MEM + N_FAR]
             d_mem = np.abs(have[:, :N_MEM] - want[:, :N_MEM]).max()
             d_far = np.abs(have[:, N_MEM:] - want[:, N_MEM:]).max()
             worst_mem = max(worst_mem, float(d_mem))

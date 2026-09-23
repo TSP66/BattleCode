@@ -44,7 +44,14 @@ enum ScalarField {
 // what lets a checkpoint trained before memory be widened with zero columns and
 // go on playing identically (train/migrate_scalars.py), so gen4 and the rest of
 // the league survive the switch as frozen opponents.
-constexpr int SC_TOTAL = SC_COUNT + mem_cfg::N_EXTRA;   // 708
+// Then the five sonar echo counts of the dragon's own last turn (bc_core.hpp
+// SonarEcho). They go on the end, after the 694 memory features, so that
+// [0, 708) is byte for byte the row every existing checkpoint was trained on
+// and the league keeps playing unchanged -- a flat net slices the row back down
+// to its own width, a pyramid takes base + memfar + echo.
+constexpr int SC_ECHO_AT = SC_COUNT + mem_cfg::N_EXTRA;   // 708
+constexpr int SC_TOTAL = SC_ECHO_AT + SONAR_ECHO_KINDS;   // 713
+constexpr int SC_FLAT_TOTAL = SC_ECHO_AT;                 // what the league reads
 
 // Reward components. The caller supplies weights; nothing is baked in.
 //
@@ -115,6 +122,12 @@ struct VecConfig {
     bool egocentric = true;    // rotate the window so the dragon faces north
     bool random_pearl_seed = true;
     int max_rounds = 500;
+    // Broadcast a sonar in all four directions on every turn, and speak
+    // protocol 3. Off by default and deliberately so: a broadcast changes what
+    // the *opponent* sees through SC_NUM_MSGS, so switching it on silently
+    // would make every frozen league member play differently and quietly
+    // invalidate the comparison they exist to provide.
+    bool sonar = false;
     // Discount inside the team potentials: each delta is gamma * phi(now) -
     // phi(then). 1 reproduces plain differences (reward v1/v2); set it to the
     // PPO gamma to make it potential-based shaping.
@@ -290,6 +303,7 @@ public:
     // acting dragon's team. For offline critic studies; costs a full write
     // per step, so leave it unbound in training.
     void bind_board(uint8_t* board) { b_board_ = board; }
+    void set_sonar(bool on) { cfg_.sonar = on; }
     // Optional: the remembered map as wide_cfg::N_WIDE floats per row, two
     // stacked scales of six planes in the acting dragon's own frame
     // (bc_memory.hpp `wide`). The 708-scalar nets never ask for it.
@@ -567,6 +581,16 @@ private:
             e.game.kill(di, DEATH_ACTION);
         }
         if (a.send_sonar && e.game.dragons[di].alive) e.game.cast_sonar(di, a.sonar);
+        if (cfg_.sonar && e.game.dragons[di].alive) {
+            // Sensing, not an action: the echo comes back free, so there is no
+            // reason not to listen in every direction. The payload is still
+            // zero -- what a dragon should say is the codec's job, and the
+            // message path is not yet verified against the engine (SONAR.md).
+            Dragon& sd = e.game.dragons[di];
+            sd.protocol = 3;
+            static const char DIR_OF[SONAR_DIRS] = {'N', 'E', 'S', 'W'};
+            for (int k = 0; k < SONAR_DIRS; k++) e.game.cast_sonar(di, DIR_OF[k], 0ull);
+        }
 
         ensure_agents(e);
         e.turn++;

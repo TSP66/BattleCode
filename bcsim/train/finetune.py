@@ -134,14 +134,20 @@ def load_policy(path: str, dev) -> tuple[ActorCritic, dict]:
     ck = torch.load(path, map_location="cpu", weights_only=False)
     a = ck["args"]
     hidden = next(v for k, v in ck["net"].items() if k.endswith("fuse.0.weight")).shape[0]
+    # The scalar width comes from the checkpoint, never from the env. The env's
+    # row grows as features are appended (708 -> 713 with the sonar echoes) and
+    # every older net has to go on reading exactly the columns it was trained
+    # on, or the frozen league stops being frozen.
+    n_scalars = next(v for k, v in ck["net"].items()
+                     if k.endswith("scalar.0.weight")).shape[1]
     if a.get("arch") == "pyramid":
         net = net_mod.PyramidActorCritic(
             bcsim.N_CHANNELS, bcsim.WIDE_CH, bcsim.N_ACTIONS,
             near_width=a["near_width"], near_blocks=a["near_blocks"],
             wide_width=a["wide_width"], wide_blocks=a["wide_blocks"],
-            wide_side=bcsim.WIDE_SIDE, hidden=hidden)
+            wide_side=bcsim.WIDE_SIDE, hidden=hidden, n_scalars=n_scalars)
     else:
-        net = ActorCritic(bcsim.N_CHANNELS, bcsim.N_SCALARS, bcsim.N_ACTIONS,
+        net = ActorCritic(bcsim.N_CHANNELS, n_scalars, bcsim.N_ACTIONS,
                           width=a["width"], blocks=a["blocks"], hidden=hidden)
     net.load_state_dict({k.replace("_orig_mod.", ""): v for k, v in ck["net"].items()})
     net.to(dev)

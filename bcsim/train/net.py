@@ -36,6 +36,7 @@ class ActorCritic(nn.Module):
     def __init__(self, n_channels: int, n_scalars: int, n_actions: int,
                  width: int = 128, blocks: int = 6, hidden: int = 512):
         super().__init__()
+        self.n_scalars = n_scalars
         self.stem = nn.Sequential(
             nn.Conv2d(n_channels, width, 3, padding=1, bias=False),
             nn.GroupNorm(8, width), nn.SiLU())
@@ -55,9 +56,15 @@ class ActorCritic(nn.Module):
         nn.init.zeros_(self.v.bias)
 
     def forward(self, local, scalar, wide=None):
-        """`wide` is accepted and ignored: callers may pass it unconditionally."""
+        """`wide` is accepted and ignored: callers may pass it unconditionally.
+
+        The scalar row is cut back to the width this net was built for. The env
+        appends new features on the end, so a checkpoint trained on 708 keeps
+        seeing exactly its 708 and plays identically -- which is what lets the
+        frozen league survive the row growing.
+        """
         x = self.flat(self.blocks(self.stem(local)))
-        h = self.fuse(torch.cat([x, self.scalar(scalar)], dim=1))
+        h = self.fuse(torch.cat([x, self.scalar(scalar[..., :self.n_scalars])], dim=1))
         return self.pi(h), self.v(h).squeeze(-1)
 
 
@@ -71,17 +78,30 @@ class ActorCritic(nn.Module):
 N_BASE_SCALARS = 14
 N_MEM_SCALARS = 676
 N_FAR_SCALARS = 18
+N_ECHO_SCALARS = 5                                                   # sonar echoes
 N_FLAT_SCALARS = N_BASE_SCALARS + N_MEM_SCALARS + N_FAR_SCALARS      # 708
 N_PYRAMID_SCALARS = N_BASE_SCALARS + N_FAR_SCALARS                   # 32
+N_PYRAMID_ECHO_SCALARS = N_PYRAMID_SCALARS + N_ECHO_SCALARS          # 37
 _FAR_AT = N_BASE_SCALARS + N_MEM_SCALARS                             # 690
+_ECHO_AT = N_FLAT_SCALARS                                            # 708
 
 
-def pyramid_scalars(scalar: torch.Tensor) -> torch.Tensor:
-    """The 32 scalars the pyramid keeps, sliced out of the env's 708."""
-    if scalar.shape[-1] == N_PYRAMID_SCALARS:
+def pyramid_scalars(scalar: torch.Tensor, want: int = N_PYRAMID_SCALARS) -> torch.Tensor:
+    """The scalars the pyramid keeps, sliced out of the env's row.
+
+    The env's row grew from 708 to 713 when the sonar echoes were appended, and
+    it may grow again. `want` is the width this particular network was built
+    for, taken from its own checkpoint, so an older pyramid keeps reading the 32
+    it was trained on and a newer one also gets the 5 echoes. Everything is a
+    slice of one row, which is why the env can serve every architecture at once.
+    """
+    if scalar.shape[-1] == want:
         return scalar
-    return torch.cat([scalar[..., :N_BASE_SCALARS],
-                      scalar[..., _FAR_AT:_FAR_AT + N_FAR_SCALARS]], dim=-1)
+    parts = [scalar[..., :N_BASE_SCALARS],
+             scalar[..., _FAR_AT:_FAR_AT + N_FAR_SCALARS]]
+    if want >= N_PYRAMID_ECHO_SCALARS and scalar.shape[-1] >= _ECHO_AT + N_ECHO_SCALARS:
+        parts.append(scalar[..., _ECHO_AT:_ECHO_AT + N_ECHO_SCALARS])
+    return torch.cat(parts, dim=-1)
 
 
 class PyramidActorCritic(nn.Module):
@@ -105,8 +125,10 @@ class PyramidActorCritic(nn.Module):
                  near_width: int = 48, near_blocks: int = 3,
                  wide_width: int = 24, wide_blocks: int = 2,
                  near_head: int = 24, wide_head: int = 16,
-                 wide_side: int = 15, wide_pool: int = 3, hidden: int = 384):
+                 wide_side: int = 15, wide_pool: int = 3, hidden: int = 384,
+                 n_scalars: int = N_PYRAMID_SCALARS):
         super().__init__()
+        self.n_scalars = n_scalars
         self.near_stem = nn.Sequential(
             nn.Conv2d(n_channels, near_width, 3, padding=1, bias=False),
             nn.GroupNorm(8, near_width), nn.SiLU())
@@ -125,7 +147,7 @@ class PyramidActorCritic(nn.Module):
                                        nn.Conv2d(wide_width, wide_head, 1, bias=False),
                                        nn.GroupNorm(8, wide_head), nn.SiLU(), nn.Flatten())
 
-        self.scalar = nn.Sequential(nn.Linear(N_PYRAMID_SCALARS, 64), nn.SiLU())
+        self.scalar = nn.Sequential(nn.Linear(n_scalars, 64), nn.SiLU())
 
         pooled = wide_side // wide_pool
         fuse_in = near_head * 7 * 7 + wide_head * pooled * pooled + 64
@@ -144,7 +166,7 @@ class PyramidActorCritic(nn.Module):
                              "(BattlecodeVecEnv(..., wide=True))")
         n = self.near_flat(self.near_blocks(self.near_stem(local)))
         w = self.wide_flat(self.wide_blocks(self.wide_stem(wide)))
-        s = self.scalar(pyramid_scalars(scalar))
+        s = self.scalar(pyramid_scalars(scalar, self.n_scalars))
         h = self.fuse(torch.cat([n, w, s], dim=1))
         return self.pi(h), self.v(h).squeeze(-1)
 
@@ -187,6 +209,7 @@ class Critic(nn.Module):
     def __init__(self, n_channels: int, n_scalars: int, n_context: int,
                  width: int = 64, blocks: int = 4, hidden: int = 512, n_extra: int = 0):
         super().__init__()
+        self.n_scalars = n_scalars
         self.stem = nn.Sequential(
             nn.Conv2d(n_channels, width, 3, padding=1, bias=False),
             nn.GroupNorm(8, width), nn.SiLU())

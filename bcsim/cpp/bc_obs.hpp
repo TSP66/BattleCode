@@ -135,6 +135,11 @@ inline void VecEnv::observe(Env& e, int index) {
         dm.wide(hx, hy, dir_index(d.facing), g.round,
                 b_wide_ + (size_t)index * wide_cfg::N_WIDE);
 
+    // What this dragon's own sonars came back with last turn. Zero throughout
+    // unless the env was built with sonar on, because nothing is cast then.
+    for (int k = 0; k < SONAR_ECHO_KINDS; k++)
+        sc[SC_ECHO_AT + k] = (float)d.echo[k] / (float)SONAR_DIRS;
+
     uint32_t* msgs = b_msgs_ + (size_t)index * MAX_MSGS;
     for (int i = 0; i < MAX_MSGS; i++)
         msgs[i] = i < (int)d.inbox.size() ? d.inbox[i] : 0u;
