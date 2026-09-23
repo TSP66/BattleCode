@@ -7,3 +7,4 @@
 {"version": "v11", "name": "ft_control-best", "ckpt": "runs/submitted/v11.pt", "source": "/Users/thomaspetty/Documents/BattleCode/runs/i2/ft_control/best.pt", "time": "2026-09-23T08:52"}
 {"version": "v12", "name": "ft_control-best", "ckpt": "runs/submitted/v12.pt", "source": "/Users/thomaspetty/Documents/BattleCode/runs/i2/ft_control/best.pt", "time": "2026-09-23T09:04"}
 {"version": "v13", "name": "sponge_2110-best", "ckpt": "runs/submitted/v13.pt", "source": "/home/thomaspetty/BattleCode/runs/i2/sponge_2110/best.pt", "time": "2026-09-23T12:07"}
+{"version": "v14", "name": "g002_s2-seg2", "ckpt": "runs/submitted/v14.pt", "source": "/home/thomaspetty/BattleCode/runs/ratchet4/cands/g002_s2/seg2.pt", "time": "2026-09-23T23:13"}

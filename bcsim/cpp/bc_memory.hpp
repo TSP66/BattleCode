@@ -52,6 +52,27 @@ constexpr int AGE_MAX = 200;
 constexpr int VISIT_MAX = 100;
 }  // namespace mem_cfg
 
+// The same remembered map as `mem`, given back as planes instead of a flat bag
+// of numbers, and reaching further.
+//
+// `mem` crops radius 6 and hands 676 floats to a Linear(708, 128) that is 0.55%
+// of the forward pass: the geometry is thrown away and 92% of the compute goes
+// on the inner 49 cells. These are the same arrays, read as two stacked scales
+// in the head's own frame:
+//   * near, stride 1, radius 7   -- the 15x15 immediately around the head;
+//   * far,  stride POOL, mean-pooled, reaching radius 4 * 7 + 1 = 29.
+// Six channels each, `mem`'s four plus the respawn timer and where an enemy was
+// last seen -- the hole that mattered, since `mem` remembers pearls and kelp
+// but forgets that it ever saw a dragon.
+namespace wide_cfg {
+constexpr int R = 7;                          // 15x15 at either scale
+constexpr int SIDE = 2 * R + 1;
+constexpr int CELLS = SIDE * SIDE;            // 225
+constexpr int CH = 6;                         // per scale
+constexpr int N_WIDE = 2 * CH * CELLS;        // 2700
+constexpr int POOL = 4;                       // world cells a far cell averages, per axis
+}  // namespace wide_cfg
+
 inline int mem_wrap(int v, int m) { return (v % m + m) % m; }
 
 // ego (row, col) of the 13x13 -> world offset, per facing. The same rotation
@@ -77,6 +98,17 @@ struct MemEgoTable {
 };
 
 inline constexpr MemEgoTable MEM_EGO{};
+
+// The same rotation MemEgoTable bakes in, for offsets past radius 6 and for the
+// pooled scale, whose sub-cell offsets are too many to table usefully.
+inline void mem_ego_to_world(int facing, int ox, int oy, int& wx, int& wy) {
+    switch (facing) {
+        case 0: wx = ox;  wy = oy;  break;
+        case 1: wx = -oy; wy = ox;  break;
+        case 2: wx = -ox; wy = -oy; break;
+        default: wx = oy; wy = -ox; break;
+    }
+}
 
 // The decay tables, built once with the trainer's rounding.
 struct MemDecay {
@@ -115,6 +147,10 @@ struct DragonMemory {
     std::vector<std::int16_t> seen, visit;   // round last seen / stood on, or NEVER
     std::vector<std::int8_t> cd;             // -1 never spawns, else the timer capped at 99
     std::vector<std::uint8_t> flags;         // bit 0 pearl, bit 1 kelp
+    // Round an enemy segment was last standing here, or NEVER. Only `wide`
+    // reads it: `mem` and `memfar` are the trainer's features and must not
+    // change, so this costs the old inputs nothing.
+    std::vector<std::int16_t> foe;
 
     static constexpr std::uint8_t PEARL = 1, KELP = 2;
 
@@ -126,6 +162,7 @@ struct DragonMemory {
         visit.assign(n, (std::int16_t)mem_cfg::NEVER);
         cd.assign(n, (std::int8_t)-1);
         flags.assign(n, 0);
+        foe.assign(n, (std::int16_t)mem_cfg::NEVER);
     }
 
     std::size_t at(int x, int y) const {
@@ -146,6 +183,9 @@ struct DragonMemory {
 
     void stand(int x, int y, int round) { visit[at(x, y)] = (std::int16_t)round; }
 
+    // Separate from see() so the trainer's `mem` and `memfar` stay bit-identical.
+    void saw_foe(int x, int y, int round) { foe[at(x, y)] = (std::int16_t)round; }
+
     bool expects_pearl(std::size_t k, int age) const {
         return (flags[k] & PEARL) != 0 || (cd[k] >= 0 && (int)cd[k] <= age);
     }
@@ -156,7 +196,62 @@ struct DragonMemory {
         memfar(hx, hy, facing, round, out + mem_cfg::N_MEM);
     }
 
+    // The wide planes, channel-major: near's six 15x15 planes, then far's.
+    // Laid out as a (2 * CH, SIDE, SIDE) tensor a conv stem can read directly.
+    void wide(int hx, int hy, int facing, int round, float* out) const {
+        using namespace wide_cfg;
+        for (int row = 0; row < SIDE; row++)
+            for (int col = 0; col < SIDE; col++) {
+                int const i = row * SIDE + col;
+                int const ox = col - R, oy = row - R;
+                // near: one world cell per plane cell
+                int wx, wy;
+                mem_ego_to_world(facing, ox, oy, wx, wy);
+                float near_ch[CH];
+                cell(at(hx + wx, hy + wy), round, near_ch);
+                for (int c = 0; c < CH; c++) out[(std::size_t)c * CELLS + i] = near_ch[c];
+
+                // far: the POOL x POOL block of world cells centred on this
+                // one, averaged. Blocks tile the plane, so the reach is
+                // POOL * R + 1 rather than R.
+                float acc[CH] = {};
+                for (int sy = 0; sy < POOL; sy++)
+                    for (int sx = 0; sx < POOL; sx++) {
+                        int const ex = POOL * ox + sx - POOL / 2;
+                        int const ey = POOL * oy + sy - POOL / 2;
+                        int fx, fy;
+                        mem_ego_to_world(facing, ex, ey, fx, fy);
+                        float one[CH];
+                        cell(at(hx + fx, hy + fy), round, one);
+                        for (int c = 0; c < CH; c++) acc[c] += one[c];
+                    }
+                float const scale = 1.0f / (float)(POOL * POOL);
+                for (int c = 0; c < CH; c++)
+                    out[(std::size_t)(CH + c) * CELLS + i] = acc[c] * scale;
+            }
+    }
+
   private:
+    // One remembered cell as wide_cfg::CH channels. The first four are `mem`'s,
+    // read the same way, so the near scale is a superset of what the flat
+    // feature carried; then the respawn timer and the decayed enemy sighting.
+    void cell(std::size_t k, int round, float* out) const {
+        using namespace mem_cfg;
+        int const age = round - (int)seen[k];
+        bool const known = age < UNKNOWN_AGE;
+        out[0] = (known && expects_pearl(k, age)) ? 1.0f : 0.0f;
+        out[1] = (known && (unsigned)age < (unsigned)AGE_MAX) ? MEM_DECAY.seen[age] : 0.0f;
+        int const since = round - (int)visit[k];
+        out[2] = (unsigned)since < (unsigned)VISIT_MAX ? MEM_DECAY.visit[since] : 0.0f;
+        out[3] = (flags[k] & KELP) ? 1.0f : 0.0f;
+        // 1 when a pearl is due now, falling to 0 at the 99-round cap; 0 where
+        // the tile never spawns or was never seen.
+        out[4] = (known && cd[k] >= 0) ? 1.0f - (float)std::min((int)cd[k], 99) / 99.0f : 0.0f;
+        int const fage = round - (int)foe[k];
+        out[5] = (fage < UNKNOWN_AGE && (unsigned)fage < (unsigned)AGE_MAX)
+                     ? MEM_DECAY.seen[fage] : 0.0f;
+    }
+
     void mem(int hx, int hy, int facing, int round, float* out) const {
         using namespace mem_cfg;
         float* expect_ch = out;

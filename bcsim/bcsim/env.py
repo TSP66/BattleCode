@@ -53,6 +53,14 @@ _layout = (ctypes.c_int * 8)()
 _lib.bcv_layout(_layout)
 N_CHANNELS, WINDOW, N_SCALARS, MAX_MSGS, N_ACTIONS, N_REWARD_COMPS, MAX_STEPS, N_MOVES = _layout
 EP_COLS = _lib.bcv_ep_cols()
+# the remembered map as planes: 2 * 6 channels of WIDE_SIDE x WIDE_SIDE, the
+# near scale then the pooled far one (cpp/bc_memory.hpp `wide`)
+if hasattr(_lib, "bcv_wide_shape"):
+    _wide = (ctypes.c_int * 2)()
+    _lib.bcv_wide_shape(_wide)
+    WIDE_CH, WIDE_SIDE = _wide[0], _wide[1]
+else:
+    WIDE_CH, WIDE_SIDE = 0, 0
 # scripted opponents for evaluation, see cpp/bc_bots.hpp
 BOTS = [_lib.bcv_bot_name(i).decode() for i in range(_lib.bcv_bot_count())]
 
@@ -143,7 +151,7 @@ class BattlecodeVecEnv:
     def __init__(self, maps: list[str], num_envs: int = 64, num_threads: int = 8,
                  seed: int = 0, egocentric: bool = True, random_pearl_seed: bool = True,
                  max_rounds: int = 500, closure_capacity: int | None = None,
-                 privileged: bool = False, board: bool = False):
+                 privileged: bool = False, board: bool = False, wide: bool = False):
         if not maps:
             raise ValueError("need at least one map")
         blob = b"".join(m.encode() for m in maps)
@@ -190,6 +198,20 @@ class BattlecodeVecEnv:
             _lib.bcv_bind_board.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
             self.board = np.zeros((num_envs, shape[0], shape[1], shape[1]), np.uint8)
             _lib.bcv_bind_board(ctypes.c_void_p(self._h), self.board.ctypes.data)
+        self.wide = None
+        if wide:
+            # (num_envs, 2 * CH, SIDE, SIDE) float32: the remembered map as
+            # planes in the acting dragon's own frame, near scale then pooled
+            # far scale (bc_memory.hpp `wide`). Unbound costs nothing, which is
+            # what the 708-scalar checkpoints want.
+            if not hasattr(_lib, "bcv_bind_wide"):
+                raise RuntimeError(f"{_LIB_PATH.name} has no wide export; "
+                                   "run `make -C bcsim`")
+            shape = (ctypes.c_int * 2)()
+            _lib.bcv_wide_shape(shape)
+            _lib.bcv_bind_wide.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            self.wide = np.zeros((num_envs, shape[0], shape[1], shape[1]), np.float32)
+            _lib.bcv_bind_wide(ctypes.c_void_p(self._h), self.wide.ctypes.data)
 
         cap = closure_capacity or max(1024, num_envs * 140)
         self._cl_env = np.zeros(cap, np.int32)

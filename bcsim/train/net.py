@@ -56,6 +56,89 @@ class ActorCritic(nn.Module):
         return self.pi(h), self.v(h).squeeze(-1)
 
 
+# The 708-scalar vector is [14 base | 676 mem | 18 memfar]. `mem` is really a
+# (4, 13, 13) feature map that Linear(708, 128) flattens, and that linear is
+# 0.55% of ActorCritic's forward pass: the geometry is discarded and 92% of the
+# compute goes on the inner 49 cells. PyramidActorCritic takes those planes from
+# the env's `wide` tensor instead, so the only scalars left to feed are the base
+# ones and memfar -- a slice of the same vector, which is why the env, the
+# league and every old checkpoint are untouched by this.
+N_BASE_SCALARS = 14
+N_MEM_SCALARS = 676
+N_FAR_SCALARS = 18
+N_FLAT_SCALARS = N_BASE_SCALARS + N_MEM_SCALARS + N_FAR_SCALARS      # 708
+N_PYRAMID_SCALARS = N_BASE_SCALARS + N_FAR_SCALARS                   # 32
+_FAR_AT = N_BASE_SCALARS + N_MEM_SCALARS                             # 690
+
+
+def pyramid_scalars(scalar: torch.Tensor) -> torch.Tensor:
+    """The 32 scalars the pyramid keeps, sliced out of the env's 708."""
+    if scalar.shape[-1] == N_PYRAMID_SCALARS:
+        return scalar
+    return torch.cat([scalar[..., :N_BASE_SCALARS],
+                      scalar[..., _FAR_AT:_FAR_AT + N_FAR_SCALARS]], dim=-1)
+
+
+class PyramidActorCritic(nn.Module):
+    """Two conv branches in the dragon's own frame, at two scales.
+
+    `local` is the live 7x7 window, ground truth. `wide` is what the dragon
+    remembers, as planes rather than a flat bag: six channels at stride 1 out to
+    radius 7, then the same six mean-pooled to reach radius 29 (see
+    cpp/bc_memory.hpp `wide`). Routing through remembered corridors is a spatial
+    problem, and this is the branch that can express it.
+
+    Cheaper than ActorCritic at 64x4, not dearer: 12.7M MAC against 16.5M, and
+    ~0.96M parameters against 1.58M, because the flattened 13x13 and the 1696
+    -> 512 fuse both go. The judge's budget is the reason -- 69M points a turn
+    measured at 16.5M MAC, against a 100M cap with the reserves taken out.
+    """
+
+    def __init__(self, n_channels: int, n_wide_ch: int, n_actions: int,
+                 near_width: int = 48, near_blocks: int = 3,
+                 wide_width: int = 24, wide_blocks: int = 2,
+                 near_head: int = 24, wide_head: int = 16,
+                 wide_side: int = 15, wide_pool: int = 3, hidden: int = 384):
+        super().__init__()
+        self.near_stem = nn.Sequential(
+            nn.Conv2d(n_channels, near_width, 3, padding=1, bias=False),
+            nn.GroupNorm(8, near_width), nn.SiLU())
+        self.near_blocks = nn.Sequential(*[ResBlock(near_width) for _ in range(near_blocks)])
+        self.near_flat = nn.Sequential(nn.Conv2d(near_width, near_head, 1, bias=False),
+                                       nn.GroupNorm(8, near_head), nn.SiLU(), nn.Flatten())
+
+        # 225 cells x 9 makes every width-24 conv 1.17M MAC, so this branch gets
+        # two blocks and is pooled before the head: full resolution at radius 15
+        # (961 cells) is not affordable at any useful width.
+        self.wide_stem = nn.Sequential(
+            nn.Conv2d(n_wide_ch, wide_width, 3, padding=1, bias=False),
+            nn.GroupNorm(8, wide_width), nn.SiLU())
+        self.wide_blocks = nn.Sequential(*[ResBlock(wide_width) for _ in range(wide_blocks)])
+        self.wide_flat = nn.Sequential(nn.AvgPool2d(wide_pool),
+                                       nn.Conv2d(wide_width, wide_head, 1, bias=False),
+                                       nn.GroupNorm(8, wide_head), nn.SiLU(), nn.Flatten())
+
+        self.scalar = nn.Sequential(nn.Linear(N_PYRAMID_SCALARS, 64), nn.SiLU())
+
+        pooled = wide_side // wide_pool
+        fuse_in = near_head * 7 * 7 + wide_head * pooled * pooled + 64
+        self.fuse = nn.Sequential(nn.Linear(fuse_in, hidden), nn.SiLU(),
+                                  nn.Linear(hidden, hidden), nn.SiLU())
+        self.pi = nn.Linear(hidden, n_actions)
+        self.v = nn.Linear(hidden, 1)
+        nn.init.orthogonal_(self.pi.weight, 0.01)
+        nn.init.zeros_(self.pi.bias)
+        nn.init.orthogonal_(self.v.weight, 1.0)
+        nn.init.zeros_(self.v.bias)
+
+    def forward(self, local, scalar, wide):
+        n = self.near_flat(self.near_blocks(self.near_stem(local)))
+        w = self.wide_flat(self.wide_blocks(self.wide_stem(wide)))
+        s = self.scalar(pyramid_scalars(scalar))
+        h = self.fuse(torch.cat([n, w, s], dim=1))
+        return self.pi(h), self.v(h).squeeze(-1)
+
+
 NEG = -1e9
 
 

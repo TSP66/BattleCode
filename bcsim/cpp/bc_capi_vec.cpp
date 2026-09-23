@@ -57,6 +57,9 @@ int bcv_priv_count() { return PRIV_COUNT; }
 void bcv_bind_board(void* p, uint8_t* board) { ((VecHandle*)p)->env->bind_board(board); }
 void bcv_board_shape(int* out) { out[0] = BOARD_CH; out[1] = BOARD_MAX; }
 
+void bcv_bind_wide(void* p, float* wide) { ((VecHandle*)p)->env->bind_wide(wide); }
+void bcv_wide_shape(int* out) { out[0] = 2 * wide_cfg::CH; out[1] = wide_cfg::SIDE; }
+
 void bcv_destroy(void* p) {
     auto* h = (VecHandle*)p;
     delete h->env;

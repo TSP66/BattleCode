@@ -67,6 +67,30 @@ Unranked games don't change ELO. `scrim.sh --battle <id>` re-reads a battle that
 - **Don't trust MAC estimates.** Measured costs are 3.3 points per MAC for the convolutions, 23 for NumPy, and ~15 for dot-product loops.
   Linear layers are exported transposed so they compile to loops the compiler can vectorise.
 - **A small replay doesn't mean the bot crashed.** Arena starts with one dragon per side. Read the death reasons instead.
+- **Never run `unswbc update mybot`.** It is new in 1.0.0 and replaces a bot's helper files with the ones the toolkit
+  ships, which would throw away `helper.hpp`, `obs.hpp`, `memory.hpp` and `net.hpp`. `submit` is safe: it only checks
+  PyPI for a newer toolkit. Set `UNSWBC_NO_UPDATE=1` to silence that check in scripts.
 
 More detail: the `battlecode-judge-cost-model` memory, and `wasmprobe/`
 (`kernel.rs` + `meter.py` benchmark individual kernels).
+
+## unswbc 1.0.0 (2026-09-23)
+
+Upgraded from 0.3.0 with `uv tool install unswbc@latest`. `metering.py` and its cost table are byte-identical, and
+`MAX_TURN_POINTS` (100M) and `MAX_MEMORY_PAGES` (768) are unchanged, so nothing about the budget moved. Three things did:
+
+- **Work after `ENDTURN` is no longer free.** `sandbox.py refill()` computes `gap = spent() - reported` and deducts it
+  from the turn starting next. `mybot` is unaffected: `main.cpp` updates memory at line 292, before it picks an action,
+  and `flush_turn()` is the last thing in the loop, so the bot blocks on the next read immediately. Re-metered after the
+  upgrade at the same **69M** max turn. Keep it that way -- do not move memory work after the write.
+- **File reads cost 6 points/byte, up from ~0.18.** Irrelevant here because `export_cpp.py` compiles the weights in,
+  which this makes correct by another 33x.
+- **The protocol is at major 3, and sonar changed.** `send_sonar(Direction, uint64)` is new alongside the old
+  facing-only uint32 form, and a dragon that cast one gets an `ECHOES kelp ally ally_head enemy enemy_head` line in its
+  next observation. **Sonar is now sensing, not just messaging**, and `bc_vec.hpp:561` casts it alongside the action, so
+  it is free. We use none of it: `mybot/helper.hpp` has the old API and no `ECHOES` parsing, `cpp/bc_core.hpp
+  cast_sonar` is facing-only with no echoes, and nothing in training ever sets `send_sonar`. That is the next capability
+  on the table, and it needs the sim rule, the bot protocol and new parity checks together.
+
+The nine maps in `maps-live/` already match 1.0.0 byte-for-byte. It also ships `arena` and `colosseum`, which
+`train.maps_fetch` does not list as active, so they are deliberately not in the rotation.

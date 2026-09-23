@@ -83,7 +83,10 @@ inline void VecEnv::observe(Env& e, int index) {
                 const bool head = g.head_at[t] != 0;
                 if (occ == di) at(head ? LC_SELF_HEAD : LC_SELF_BODY, row, col) = 1.0f;
                 else if (o.team == d.team) at(head ? LC_ALLY_HEAD : LC_ALLY_BODY, row, col) = 1.0f;
-                else at(head ? LC_ENEMY_HEAD : LC_ENEMY_BODY, row, col) = 1.0f;
+                else {
+                    at(head ? LC_ENEMY_HEAD : LC_ENEMY_BODY, row, col) = 1.0f;
+                    dm.saw_foe(x, y, g.round);   // only the wide planes read this
+                }
                 const int world_dir = g.seg_dir[t];
                 const int shown = (world_dir - facing + 4) % 4;
                 at(LC_FACE_N + shown, row, col) = 1.0f;
@@ -125,6 +128,12 @@ inline void VecEnv::observe(Env& e, int index) {
     // zero when the window is not egocentric).
     dm.stand(hx, hy, g.round);
     dm.features(hx, hy, dir_index(d.facing), g.round, sc + SC_COUNT);
+
+    // The same memory as planes, for a net with a conv branch over it. Bound
+    // only when something asks, so the 708-scalar checkpoints pay nothing.
+    if (b_wide_)
+        dm.wide(hx, hy, dir_index(d.facing), g.round,
+                b_wide_ + (size_t)index * wide_cfg::N_WIDE);
 
     uint32_t* msgs = b_msgs_ + (size_t)index * MAX_MSGS;
     for (int i = 0; i < MAX_MSGS; i++)

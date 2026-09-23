@@ -287,6 +287,10 @@ public:
     // acting dragon's team. For offline critic studies; costs a full write
     // per step, so leave it unbound in training.
     void bind_board(uint8_t* board) { b_board_ = board; }
+    // Optional: the remembered map as wide_cfg::N_WIDE floats per row, two
+    // stacked scales of six planes in the acting dragon's own frame
+    // (bc_memory.hpp `wide`). The 708-scalar nets never ask for it.
+    void bind_wide(float* wide) { b_wide_ = wide; }
 
     void reset() {
         closures_.clear();
@@ -886,6 +890,7 @@ private:
 
     float* b_priv_ = nullptr;
     uint8_t* b_board_ = nullptr;
+    float* b_wide_ = nullptr;
     float* b_local_ = nullptr;
     float* b_scalar_ = nullptr;
     uint32_t* b_msgs_ = nullptr;
