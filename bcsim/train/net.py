@@ -29,6 +29,10 @@ class ResBlock(nn.Module):
 class ActorCritic(nn.Module):
     """Conv trunk over the 7x7 window, scalars folded in, two heads."""
 
+    # whether forward() needs the env's `wide` tensor; lets one call site serve
+    # both architectures, and says whether a run must bind it
+    wants_wide = False
+
     def __init__(self, n_channels: int, n_scalars: int, n_actions: int,
                  width: int = 128, blocks: int = 6, hidden: int = 512):
         super().__init__()
@@ -50,7 +54,8 @@ class ActorCritic(nn.Module):
         nn.init.orthogonal_(self.v.weight, 1.0)
         nn.init.zeros_(self.v.bias)
 
-    def forward(self, local, scalar):
+    def forward(self, local, scalar, wide=None):
+        """`wide` is accepted and ignored: callers may pass it unconditionally."""
         x = self.flat(self.blocks(self.stem(local)))
         h = self.fuse(torch.cat([x, self.scalar(scalar)], dim=1))
         return self.pi(h), self.v(h).squeeze(-1)
@@ -94,6 +99,8 @@ class PyramidActorCritic(nn.Module):
     measured at 16.5M MAC, against a 100M cap with the reserves taken out.
     """
 
+    wants_wide = True
+
     def __init__(self, n_channels: int, n_wide_ch: int, n_actions: int,
                  near_width: int = 48, near_blocks: int = 3,
                  wide_width: int = 24, wide_blocks: int = 2,
@@ -131,7 +138,10 @@ class PyramidActorCritic(nn.Module):
         nn.init.orthogonal_(self.v.weight, 1.0)
         nn.init.zeros_(self.v.bias)
 
-    def forward(self, local, scalar, wide):
+    def forward(self, local, scalar, wide=None):
+        if wide is None:
+            raise ValueError("PyramidActorCritic needs the env's `wide` tensor "
+                             "(BattlecodeVecEnv(..., wide=True))")
         n = self.near_flat(self.near_blocks(self.near_stem(local)))
         w = self.wide_flat(self.wide_blocks(self.wide_stem(wide)))
         s = self.scalar(pyramid_scalars(scalar))

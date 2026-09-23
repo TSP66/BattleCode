@@ -55,6 +55,7 @@ if "--privileged" in sys.argv:
 
 import bcsim                                    # noqa: E402
 from train import augment                       # noqa: E402
+from train import net as net_mod                 # noqa: E402
 from train.net import ActorCritic, Critic, masked_logits, policy_out  # noqa: E402
 from train.rollout import Rollout               # noqa: E402
 from train.train import POTENTIAL_DISCOUNT, REWARDS  # noqa: E402
@@ -120,11 +121,24 @@ def reward_weights(name: str, scale: float) -> dict[str, float]:
 
 
 def load_policy(path: str, dev) -> tuple[ActorCritic, dict]:
+    """The one place a policy checkpoint becomes a network.
+
+    `args["arch"]` picks the architecture. Checkpoints written before the
+    pyramid existed have no such key, which is the flat 708-scalar
+    ActorCritic -- so every clone and league member still loads unchanged.
+    """
     ck = torch.load(path, map_location=dev, weights_only=False)
     a = ck["args"]
-    net = ActorCritic(bcsim.N_CHANNELS, bcsim.N_SCALARS, bcsim.N_ACTIONS,
-                      width=a["width"], blocks=a["blocks"],
-                      hidden=next(v for k, v in ck["net"].items() if k.endswith("fuse.0.weight")).shape[0]).to(dev)
+    hidden = next(v for k, v in ck["net"].items() if k.endswith("fuse.0.weight")).shape[0]
+    if a.get("arch") == "pyramid":
+        net = net_mod.PyramidActorCritic(
+            bcsim.N_CHANNELS, bcsim.WIDE_CH, bcsim.N_ACTIONS,
+            near_width=a["near_width"], near_blocks=a["near_blocks"],
+            wide_width=a["wide_width"], wide_blocks=a["wide_blocks"],
+            wide_side=bcsim.WIDE_SIDE, hidden=hidden).to(dev)
+    else:
+        net = ActorCritic(bcsim.N_CHANNELS, bcsim.N_SCALARS, bcsim.N_ACTIONS,
+                          width=a["width"], blocks=a["blocks"], hidden=hidden).to(dev)
     net.load_state_dict({k.replace("_orig_mod.", ""): v for k, v in ck["net"].items()})
     return net, ck
 

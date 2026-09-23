@@ -32,7 +32,7 @@ import torch.nn.functional as F
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 import bcsim                                    # noqa: E402
-from train.net import ActorCritic, masked_logits  # noqa: E402
+from train.net import ActorCritic, PyramidActorCritic, masked_logits  # noqa: E402
 from train.student import Student                 # noqa: E402
 from train.yardstick import load_net              # noqa: E402
 
@@ -47,7 +47,9 @@ def parse() -> argparse.Namespace:
     p.add_argument("--envs", type=int, default=512)
     p.add_argument("--steps", type=int, default=64)
     p.add_argument("--threads", type=int, default=12)
-    p.add_argument("--arch", choices=["actorcritic", "student"], default="actorcritic",
+    p.add_argument("--wide-width", type=int, default=24, help="--arch pyramid: memory branch width")
+    p.add_argument("--wide-blocks", type=int, default=2, help="--arch pyramid: memory branch blocks")
+    p.add_argument("--arch", choices=["actorcritic", "student", "pyramid"], default="actorcritic",
                    help="actorcritic ships through export_cpp; student has no C++ path")
     p.add_argument("--width", type=int, default=None, help="default 64 (actorcritic) / 32")
     p.add_argument("--blocks", type=int, default=None, help="default 4 (actorcritic) / 2")
@@ -78,18 +80,31 @@ def main() -> None:
         p.requires_grad_(False)
 
     ac = a.arch == "actorcritic"
-    a.width = a.width or (64 if ac else 32)
-    a.blocks = a.blocks or (4 if ac else 2)
-    a.hidden = a.hidden or (512 if ac else 256)
-    if ac:
+    pyr = a.arch == "pyramid"
+    a.width = a.width or (64 if ac else 48 if pyr else 32)
+    a.blocks = a.blocks or (4 if ac else 3 if pyr else 2)
+    a.hidden = a.hidden or (512 if ac else 384 if pyr else 256)
+    if pyr:
+        # the warm start for a PPO run on the new architecture: no weight of a
+        # 708-scalar net transfers, but the pyramid sees a superset of what the
+        # teacher sees (radius 29 against radius 6, off the same memory), so
+        # there is no information gap and it can match the teacher outright.
+        net = PyramidActorCritic(bcsim.N_CHANNELS, bcsim.WIDE_CH, bcsim.N_ACTIONS,
+                                 near_width=a.width, near_blocks=a.blocks,
+                                 wide_width=a.wide_width, wide_blocks=a.wide_blocks,
+                                 wide_side=bcsim.WIDE_SIDE, hidden=a.hidden).to(dev)
+        student = lambda local, scalar, wide: net(local, scalar, wide)[0]   # noqa: E731
+        params = list(net.parameters())
+    elif ac:
         net = ActorCritic(bcsim.N_CHANNELS, bcsim.N_SCALARS, bcsim.N_ACTIONS,
                           width=a.width, blocks=a.blocks, hidden=a.hidden).to(dev)
-        student = lambda local, scalar: net(local, scalar)[0]      # noqa: E731
+        student = lambda local, scalar, wide=None: net(local, scalar)[0]    # noqa: E731
         params = list(net.parameters())
     else:
         net = Student(bcsim.N_CHANNELS, bcsim.N_SCALARS, bcsim.N_ACTIONS,
                       width=a.width, blocks=a.blocks, hidden=a.hidden).to(dev)
-        student, params = net, list(net.parameters())
+        params = list(net.parameters())
+        student = lambda local, scalar, wide=None: net(local, scalar)       # noqa: E731
     n_params = sum(p.numel() for p in params)
     print(f"teacher iter {ck['iter']} (width {ta['width']} blocks {ta['blocks']})")
     print(f"student {a.arch} {a.width}x{a.blocks} hidden {a.hidden}: "
@@ -100,7 +115,7 @@ def main() -> None:
 
     env = bcsim.BattlecodeVecEnv(bcsim.load_maps(a.maps), num_envs=a.envs,
                                  num_threads=a.threads, seed=11,
-                                 closure_capacity=max(8192, a.envs * 160))
+                                 closure_capacity=max(8192, a.envs * 160), wide=pyr)
     obs = env.reset()
     n = a.envs
     buf_local = torch.zeros(a.steps, n, bcsim.N_CHANNELS, bcsim.WINDOW, bcsim.WINDOW,
@@ -108,6 +123,8 @@ def main() -> None:
     buf_scalar = torch.zeros(a.steps, n, bcsim.N_SCALARS, dtype=torch.float16, device=dev)
     buf_mask = torch.zeros(a.steps, n, bcsim.N_ACTIONS, dtype=torch.bool, device=dev)
     buf_logp = torch.zeros(a.steps, n, bcsim.N_ACTIONS, dtype=torch.float16, device=dev)
+    buf_wide = (torch.zeros(a.steps, n, bcsim.WIDE_CH, bcsim.WIDE_SIDE, bcsim.WIDE_SIDE,
+                            dtype=torch.float16, device=dev) if pyr else None)
     t_start = time.perf_counter()
 
     for it in range(a.iters):
@@ -123,6 +140,8 @@ def main() -> None:
             buf_scalar[t] = scalar.half()
             buf_mask[t] = mask
             buf_logp[t] = logp.half()
+            if pyr:
+                buf_wide[t] = torch.from_numpy(env.wide).to(dev, non_blocking=True).half()
             action = torch.multinomial(logp.exp(), 1).squeeze(1)
             obs, _, _ = env.step(action.to(torch.int32).cpu().numpy())
 
@@ -131,6 +150,8 @@ def main() -> None:
         fs = buf_scalar.reshape(flat, bcsim.N_SCALARS)
         fm = buf_mask.reshape(flat, bcsim.N_ACTIONS)
         fp = buf_logp.reshape(flat, bcsim.N_ACTIONS)
+        fw = (buf_wide.reshape(flat, bcsim.WIDE_CH, bcsim.WIDE_SIDE, bcsim.WIDE_SIDE)
+              if pyr else None)
 
         net.train()
         tot_kl, tot_agree, nb = 0.0, 0.0, 0
@@ -140,7 +161,8 @@ def main() -> None:
                 idx = perm[s:s + a.minibatch]
                 m = fm[idx]
                 t_logp = fp[idx].float()
-                s_logits = student(fl[idx].float(), fs[idx].float())
+                s_logits = student(fl[idx].float(), fs[idx].float(),
+                                   fw[idx].float() if pyr else None)
                 s_logp = F.log_softmax(masked_logits(s_logits, m), dim=1)
                 # the teacher's -inf entries contribute nothing, so the KL is
                 # taken over legal actions only and stays finite
@@ -166,7 +188,14 @@ def main() -> None:
         if it % 25 == 0 or it == a.iters - 1:
             # train.py's layout: args carries width/blocks for load_net / export_cpp
             torch.save({"net": net.state_dict(), "iter": it, "total_turns": (it + 1) * flat,
-                        "args": {**vars(a), "width": a.width, "blocks": a.blocks},
+                        "args": {**vars(a), "width": a.width, "blocks": a.blocks,
+                                 # load_policy dispatches on this; a pyramid also
+                                 # needs its two branch shapes named the way it
+                                 # rebuilds them
+                                 **({"arch": "pyramid", "near_width": a.width,
+                                     "near_blocks": a.blocks,
+                                     "wide_width": a.wide_width,
+                                     "wide_blocks": a.wide_blocks} if pyr else {})},
                         "teacher_iter": ck["iter"]}, out / "latest.pt")
 
 

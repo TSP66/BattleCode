@@ -23,12 +23,21 @@ MAX_IDS = 1 << ID_BITS
 class Rollout:
     def __init__(self, steps: int, num_envs: int, n_channels: int, window: int,
                  n_scalars: int, n_actions: int, device: torch.device,
-                 store_dtype: torch.dtype = torch.float16):
+                 store_dtype: torch.dtype = torch.float16,
+                 wide_shape: tuple[int, int, int] | None = None):
+        """`wide_shape` (channels, side, side) also stores the env's
+        remembered-map planes, for a PyramidActorCritic.
+
+        The scalar row stays the env's full 708 even though the pyramid reads
+        only 32 of them: the frozen opponents and the KL teacher sharing these
+        batches are 708-scalar nets reading the same tensors."""
         self.T, self.N = steps, num_envs
         self.device = device
         z = lambda *s, dt=torch.float32: torch.zeros(*s, dtype=dt, device=device)
         self.local = z(steps, num_envs, n_channels, window, window, dt=store_dtype)
         self.scalar = z(steps, num_envs, n_scalars, dt=store_dtype)
+        self.wide = (z(steps, num_envs, *wide_shape, dt=store_dtype)
+                     if wide_shape else None)
         self.mask = torch.zeros(steps, num_envs, n_actions, dtype=torch.bool, device=device)
         self.action = z(steps, num_envs, dt=torch.int64)
         self.logp = z(steps, num_envs)
@@ -58,6 +67,8 @@ class Rollout:
         self._p_local_np = self._p_local.numpy()
         self._p_scalar_np = self._p_scalar.numpy()
         self._p_mask_np = self._p_mask.numpy()
+        self._p_wide = pin(num_envs, *wide_shape, dt=torch.float32) if wide_shape else None
+        self._p_wide_np = self._p_wide.numpy() if wide_shape else None
 
     def begin(self) -> None:
         self.t = 0
@@ -72,11 +83,12 @@ class Rollout:
         self.n_closed = 0
         self.comp_total: np.ndarray | None = None
 
-    def stage(self, obs):
+    def stage(self, obs, wide=None):
         """Copies the env's reusable buffers into pinned memory and uploads.
 
         The env overwrites `obs` in place on the next step, so this copy is not
-        optional.
+        optional. `wide` is the env's `wide` array when one is bound; it lives
+        on the env rather than on `obs`, so it is passed separately.
         """
         np.copyto(self._p_local_np, obs.local)
         np.copyto(self._p_scalar_np, obs.scalar)
@@ -84,7 +96,10 @@ class Rollout:
         local = self._p_local.to(self.device, non_blocking=True)
         scalar = self._p_scalar.to(self.device, non_blocking=True)
         mask = self._p_mask.to(self.device, non_blocking=True).bool()
-        return local, scalar, mask
+        if self._p_wide_np is None:
+            return local, scalar, mask
+        np.copyto(self._p_wide_np, wide)
+        return local, scalar, mask, self._p_wide.to(self.device, non_blocking=True)
 
     def record(self, t: int, staged, obs, action, logp, value, learn=None) -> None:
         """Stores the observation acted on and the action taken, at slot t.
@@ -93,10 +108,12 @@ class Rollout:
         opponent's turns) are stored but never linked, so they never close and
         never enter a batch, and their closures count as orphans.
         """
-        local, scalar, mask = staged
+        local, scalar, mask = staged[0], staged[1], staged[2]
         self.local[t].copy_(local, non_blocking=True)
         self.scalar[t].copy_(scalar, non_blocking=True)
         self.mask[t].copy_(mask, non_blocking=True)
+        if self.wide is not None:
+            self.wide[t].copy_(staged[3], non_blocking=True)
         self.action[t] = action
         self.logp[t] = logp
         self.value[t] = value
@@ -174,6 +191,18 @@ class Rollout:
     def flat_batch(self, adv, ret, valid):
         sel = valid.reshape(-1).nonzero(as_tuple=True)[0]
         flat = lambda x: x.reshape(self.T * self.N, *x.shape[2:])
+        if self.wide is not None:
+            return {
+                "local": flat(self.local)[sel],
+                "scalar": flat(self.scalar)[sel],
+                "wide": flat(self.wide)[sel],
+                "mask": flat(self.mask)[sel],
+                "action": flat(self.action)[sel],
+                "logp": flat(self.logp)[sel],
+                "value": flat(self.value)[sel],
+                "adv": adv.reshape(-1)[sel],
+                "ret": ret.reshape(-1)[sel],
+            }
         return {
             "local": flat(self.local)[sel],
             "scalar": flat(self.scalar)[sel],

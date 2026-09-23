@@ -125,7 +125,13 @@ def main() -> None:
     # ---- networks
     ck = torch.load(a.init, map_location=dev, weights_only=False)
     policy, _ = load_policy(a.init, dev)
-    width, blocks = ck["args"]["width"], ck["args"]["blocks"]
+    # a pyramid checkpoint records its own two branches instead of one width
+    arch = ck["args"].get("arch")
+    shape = ({k: ck["args"][k] for k in
+              ("arch", "near_width", "near_blocks", "wide_width", "wide_blocks")}
+             if arch == "pyramid" else
+             {"width": ck["args"]["width"], "blocks": ck["args"]["blocks"]})
+    width, blocks = shape.get("width", 0), shape.get("blocks", 0)
     popt = torch.optim.AdamW(policy.parameters(), lr=a.lr, weight_decay=0.0, eps=1e-5)
     done0 = 0                                    # turns this candidate already trained
     if a.cont and "opt" in ck and ck.get("ratchet"):
@@ -167,7 +173,8 @@ def main() -> None:
         print(f"map sampling: {len(live & set(map_names))} live maps at {a.live_share:.0%}, "
               f"{len(held)} others at {1 - a.live_share:.0%} ({', '.join(held)})", flush=True)
     env = bcsim.BattlecodeVecEnv(texts, num_envs=a.envs, num_threads=a.threads, seed=a.seed,
-                                 closure_capacity=max(8192, a.envs * 160), privileged=True)
+                                 closure_capacity=max(8192, a.envs * 160), privileged=True,
+                                 wide=policy.wants_wide)
     env.set_map_weights(map_w)
     no_reward = bcsim.reward_vector({})         # closures only keep the chains honest
 
@@ -186,7 +193,10 @@ def main() -> None:
     assign(np.arange(N))
     zero_ctx = torch.zeros(1, 1, device=dev)
     outcome_u = torch.tensor(team_critic.OUTCOME_VALUE, device=dev)
-    roll = Rollout(T, N, bcsim.N_CHANNELS, bcsim.WINDOW, bcsim.N_SCALARS, bcsim.N_ACTIONS, dev)
+    wide_shape = ((bcsim.WIDE_CH, bcsim.WIDE_SIDE, bcsim.WIDE_SIDE)
+                  if policy.wants_wide else None)
+    roll = Rollout(T, N, bcsim.N_CHANNELS, bcsim.WINDOW, bcsim.N_SCALARS, bcsim.N_ACTIONS, dev,
+                   wide_shape=wide_shape)
     priv_buf = torch.zeros(T, N, N_PRIV, device=dev)
     probs = torch.zeros(T, N, 3, device=dev)
     zero_v = torch.zeros(N, device=dev)
@@ -212,7 +222,7 @@ def main() -> None:
     def save(path: pathlib.Path, it: int, cand: int) -> None:
         ckpt = {"net": policy.state_dict(), "opt": popt.state_dict(), "ratchet": True,
                 "iter": it, "total_turns": cand, "cand_turns": cand,
-                "args": {**vars(a), "width": width, "blocks": blocks}}
+                "args": {**vars(a), **shape}}
         tmp = path.with_suffix(".tmp")
         torch.save(ckpt, tmp)
         tmp.replace(path)
@@ -233,10 +243,11 @@ def main() -> None:
         ended = {}
         t0 = time.perf_counter()
         for t in range(T):
-            staged = roll.stage(obs)
+            staged = roll.stage(obs, env.wide)
+            w_now = staged[3] if policy.wants_wide else None
             learn = (learner < 0) | (obs.team == learner)
             with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-                logits, _ = policy(staged[0], staged[1])
+                logits, _ = policy(staged[0], staged[1], w_now)
                 if a.explore > 0:
                     # Behaviour = (1 - eps) * policy + eps * uniform over legal moves.
                     # The recorded logp is the POLICY's, not the mixture's: an exact
@@ -323,6 +334,7 @@ def main() -> None:
             continue
         flat = lambda x: x.reshape(T * N, *x.shape[2:])[sel]
         b_local, b_scalar, b_mask = flat(roll.local), flat(roll.scalar), flat(roll.mask)
+        b_wide = flat(roll.wide) if roll.wide is not None else None
         b_action, b_logp = flat(roll.action), flat(roll.logp)
         b_adv = flat(adv_raw)
         b_adv = (b_adv - b_adv.mean()) / (b_adv.std() + 1e-8)
@@ -356,11 +368,12 @@ def main() -> None:
         for s in range(0, n, a.minibatch):
             ix = perm[s:s + a.minibatch]
             lb, sb, mask_b = b_local[ix].float(), b_scalar[ix].float(), b_mask[ix]
+            wb = b_wide[ix].float() if b_wide is not None else None
             with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
                 t_logits, _ = teacher(lb, sb)
             t_logp = torch.log_softmax(masked_logits(t_logits.float(), mask_b), dim=1)
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                logits, _ = policy(lb, sb)
+                logits, _ = policy(lb, sb, wb)
             _, logp, ent = policy_out(logits, mask_b, b_action[ix])
             ratio = (logp - b_logp[ix]).exp()
             mb = b_adv[ix]
