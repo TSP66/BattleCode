@@ -170,7 +170,8 @@ def main() -> None:
     # that file (ft6: the drifted team head replaced by the pretrained one)
     critic_reset = bool(ck and a.critic_init)
     if ck and not critic_reset:
-        critic = team_critic.build(bcsim.N_CHANNELS, bcsim.N_SCALARS, n_ctx,
+        critic = team_critic.build(bcsim.N_CHANNELS,
+                                   ck["critic"]["scalar.0.weight"].shape[1], n_ctx,
                                    ck["critic_args"]["width"], ck["critic_args"]["blocks"]).to(dev)
         critic.load_state_dict(ck["critic"])
         c_args = ck["critic_args"]
@@ -191,6 +192,11 @@ def main() -> None:
         for q in tcrit.parameters():
             q.requires_grad_(False)
         print(f"team value from a frozen critic: {a.freeze_team}", flush=True)
+    # a critic saved before the memory features is narrower than the env is now
+    # wide; the base scalars keep indices 0..13, so the leading slice is exactly
+    # what it was trained on (see migrate_scalars.py)
+    N_CRITIC_SCALARS = critic.scalar[0].weight.shape[1]
+    N_TCRIT_SCALARS = tcrit.scalar[0].weight.shape[1] if tcrit is not None else 0
     popt = torch.optim.AdamW(policy.parameters(), lr=a.lr, weight_decay=0.0, eps=1e-5)
     copt = torch.optim.AdamW(critic.parameters(), lr=a.critic_lr, weight_decay=0.0, eps=1e-5)
     start_iter, base_turns = 0, 0
@@ -370,12 +376,12 @@ def main() -> None:
                 sl = slice(s0, min(s0 + 16, T))
                 k = sl.stop - sl.start
                 tl, sv = critic(roll.local[sl].reshape(k * N, *roll.local.shape[2:]).float(),
-                                roll.scalar[sl].reshape(k * N, -1).float(),
+                                roll.scalar[sl].reshape(k * N, -1)[:, :N_CRITIC_SCALARS].float(),
                                 ctx_eye[ctx_buf[sl].reshape(-1)],
                                 priv_buf[sl].reshape(k * N, -1))
                 if tcrit is not None:
                     tl, _ = tcrit(roll.local[sl].reshape(k * N, *roll.local.shape[2:]).float(),
-                                  roll.scalar[sl].reshape(k * N, -1).float(),
+                                  roll.scalar[sl].reshape(k * N, -1)[:, :N_TCRIT_SCALARS].float(),
                                   ctx_eye[ctx_buf[sl].reshape(-1)],
                                   priv_buf[sl].reshape(k * N, -1))
                 probs[sl] = tl.float().softmax(-1).reshape(k, N, 3)
@@ -482,7 +488,8 @@ def main() -> None:
             perm = torch.randperm(n, device=dev)
             for s in range(0, n, a.minibatch):
                 ix = perm[s:s + a.minibatch]
-                lb, sb = batch["local"][ix].float(), batch["scalar"][ix].float()
+                lb = batch["local"][ix].float()
+                sb = batch["scalar"][ix][:, :N_CRITIC_SCALARS].float()
                 with torch.autocast("cuda", dtype=torch.bfloat16):
                     tlog, sv = critic(lb, sb, ctx_eye[batch["ctx"][ix]], batch["priv"][ix])
                 okt, oks = batch["ok_t"][ix].float(), batch["ok_s"][ix].float()
@@ -494,7 +501,8 @@ def main() -> None:
                 if a.mc_coef and mc_n >= a.mc_min and tcrit is None:
                     j = torch.randint(0, mc_n, (a.mc_batch,), device=dev)
                     with torch.autocast("cuda", dtype=torch.bfloat16):
-                        mlog, _ = critic(mc["local"][j].float(), mc["scalar"][j].float(),
+                        mlog, _ = critic(mc["local"][j].float(),
+                                         mc["scalar"][j][:, :N_CRITIC_SCALARS].float(),
                                          ctx_eye[mc["ctx"][j]], mc["priv"][j])
                     l_mc = torch.nn.functional.cross_entropy(mlog.float(), mc["y"][j])
                 l_s = (0.5 * (sv.float() - batch["ret_s"][ix] / scale_used) ** 2 * oks).sum() \
