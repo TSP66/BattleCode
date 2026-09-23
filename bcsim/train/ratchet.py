@@ -183,7 +183,10 @@ class Supervisor:
         (self.run / "anchors").mkdir(exist_ok=True)
         a0 = self.run / "anchors" / "gen0.pt"
         shutil.copy(self.a.start, a0)
-        self.s = {"gen": 1, "segment": 0, "anchor": str(a0), "anchor_name": "gen0 (ft6 113M)",
+        # the label is display only, but the FIRST token becomes the league key
+        # when gen0 is promoted (see _promote), so it must stay "gen0"
+        seed_tag = pathlib.Path(self.a.start).parent.name or pathlib.Path(self.a.start).stem
+        self.s = {"gen": 1, "segment": 0, "anchor": str(a0), "anchor_name": f"gen0 ({seed_tag})",
                   "anchor_scores": None, "league": [[n, str(p)] for n, p in DEFAULT_LEAGUE],
                   "cand": None, "turns": 0, "lr": self.a.lr, "discards": 0,
                   "seed": 1, "failures": 0, "promotions": 0}
