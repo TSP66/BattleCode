@@ -184,10 +184,20 @@ the message path.
 
 ## Still unmeasured
 
-- The **point cost** of a `SONAR` line. Four lines a turn is four more writes
-  worth of output unless the helper batches them; `SUBMITTING.md` records that
-  output is metered at `READ_BYTE_COST` 6/byte and that one flushed write a turn
-  is the budgeted case. **Meter this before broadcasting four a turn.**
+- ~~The point cost of a `SONAR` line.~~ **Measured, and it is cheap.**
+  `wasmprobe/meter_bot.sh` on a copy of mybot that appends four directed sonars
+  with a full 64-bit payload plus `PROTOCOL 3` to the same buffered write:
+
+      turn            9            10            11
+      baseline    68,925,455    68,915,296    68,915,080
+      + 4 sonars  69,438,386    69,428,227    69,428,011
+      delta          512,931       512,931       512,931
+
+  **0.51M points a turn, 0.6% of the cap**, identical on every turn, because the
+  lines join the one write the bot already makes rather than adding writes. So
+  "broadcast in every direction every turn" is affordable. Computing a *useful*
+  payload is the real cost: the codec's encoder is a further 3.3M (train/memcodec),
+  making about 3.8M in total.
 - Whether the engine's ray has a different length limit than our `w + h`, and
   how it crosses portals. These are the two remaining candidates for the 9%.
 - Why 18 messages in one game decoded as coming from the receiver itself, when
