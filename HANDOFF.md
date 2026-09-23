@@ -1,3 +1,77 @@
+# Handoff — 2026-09-23 ~12:40: ratchet2 RUNNING (memory, 21 maps, fresh critic)
+
+## Running now
+```
+runs/ratchet2/launch.sh   (setsid, supervisor.out / ratchet.log)
+  seed        runs/i2/sponge_2110/best.pt  (= v13)
+  train maps  maps-all   21 maps, live seven held at 60% (--live-share 0.6)
+  gate maps   maps-live   7 maps -- a gate score still means ladder strength
+  league      gen4 (frozen), devtest_2050, v12, v10, sabotage, shink_r1
+  critic      runs/team_critic/pretrained.pt  (refit, see below)
+```
+`maps-all/` is derived and gitignored: `cp maps/*.map maps-gen/*.map maps-all/`.
+Stop with `touch runs/ratchet2/STOP` (exits at the next decision point) or kill the group.
+
+## v13 is on the ladder
+Sponge sub-2110 clone, uploaded 2026-09-23, all six checks passed (69M of the judge's
+100M on the worst turn; 228 first turns, 0 fallbacks). It replaces **v12, which the round
+robin put last of four** -- beaten 0.661 by devtest and 0.630 by sponge, the only results
+outside noise at se 0.029.
+
+## THE CRITIC FINDING (the user's idea, and it was load-bearing)
+A refit alone cannot give a "clean" critic: same data + same seed reproduces the old
+weights **bit for bit** (both hash to 1aca05f429283f45). Only new data changes it.
+Scored on the SAME held-out games, split by source (`train.critic_compare`):
+```
+                      replay (real play)      invented maps
+  old (replay-only)   ev 0.507  ll 0.3866    ev -0.0801  ll 0.7825
+  new (combined)      ev 0.5135 ll 0.3773    ev  0.2199  ll 0.5842
+```
+**The old critic had NEGATIVE explained variance on invented maps** -- worse than predicting
+the mean, on 40% of training. The new one is better on both subsets. Note the raw `ev` a
+pretrain prints fell 0.5068 -> 0.4615 between the runs: that is the held-out SET changing
+as self-play joins the split, NOT the critic. Always compare with `critic_compare`.
+Old critic kept as `runs/team_critic/pretrained_pre20260923.pt`.
+
+Invented maps are still much harder (0.22 vs 0.51), so more self-play games there would
+likely pay. Refit between generations if `calib_ev` drifts.
+
+## Memory is in the simulator (bcsim.N_SCALARS = 708)
+- `cpp/bc_memory.hpp`; gate `tests/parity_memory.py` = 144,000 turns, max diff **0** vs the
+  Python MemoryTracker. `wasmprobe` check 3 now compares all 708 and passes, so
+  `mybot/memory.hpp` and `bc_memory.hpp` agree independently.
+- Cost: rollout 235,190 -> 188,945 turns/s (**-20%**, ~16% per PPO iteration). The Python
+  tracker was 22.8k turns/s and 26 MB an env, i.e. 8.3x worse and ~26 GB at 1024 envs.
+- **Any 14-scalar checkpoint must be widened first**: `train.migrate_scalars` zero-pads the
+  scalar layer, which leaves play identical. `runs/anchors708/` holds the migrated league.
+- **gen4 is preserved exactly**, as the user required: 192,000 turns in the 708 env,
+  **0 action mismatches, max logit diff 0**.
+
+## Lessons worth keeping
+- **Imitation accuracy does not predict playing strength.** Sponge clones its teacher 6
+  points worse than devtest (0.8169 vs 0.8788) and plays at least as well. Rank clones by
+  play, never by val_acc. Ladder position does not predict it either -- cheji is #1 and
+  was never cloned; 1,402 games are scraped and ready if that is worth testing.
+- **`val_acc_novel` is a composition artefact.** Repeats concentrate in openings (96% of
+  rounds 0-10), which are the EASIEST rows (0.976 accuracy), and the effect reverses late
+  (round 350+: repeats 0.8345 vs novel 0.8836). Do not headline it.
+- **4 epochs, not 6**, for clones: three runs where the last epoch gained nothing and
+  val_nll turned. Both new clones' best.pt came from epoch 3.
+- **Gate maps with a trained policy, not random play.** `wormhole` looked fine at 42 rounds
+  under random play and collapsed to 5-round games under trained play. It is dropped, with
+  the diagnosis in its docstring: portals that deliver you into the enemy's boxed-in strip.
+- `pgrep -f "<pattern>"` matches your own watcher's command line. A wait loop built that way
+  deadlocks on itself; it cost ~10 minutes here.
+
+## Known rough edges
+- `team_critic selfplay` picks a policy **per step, not per team**, so it is a flickering
+  mixture playing itself rather than two policies contesting. Data is valid, the design is
+  not what it should be. Fix before the next recording.
+- `imitate2.py:218` throws a benign `.item()` UserWarning; one `.detach()` fixes it.
+- `finetune_team.py` still feeds the critic full-width scalars; it will need the same slice
+  `ratchet_train.py` got if it is used again.
+
+---
 # Handoff — 2026-09-23 ~11:55: memory is in the simulator; PPO ready to restart
 
 ## Everything the restart needs is built and gated
