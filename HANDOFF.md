@@ -1,16 +1,54 @@
-# Handoff — 2026-09-23 ~12:40: ratchet2 RUNNING (memory, 21 maps, fresh critic)
+# Handoff — 2026-09-23 ~13:15: ratchet3 RUNNING (memory, 23 maps, fresh critic)
 
 ## Running now
 ```
-runs/ratchet2/launch.sh   (setsid, supervisor.out / ratchet.log)
+runs/ratchet3/launch.sh   (setsid, supervisor.out / ratchet.log)
   seed        runs/i2/sponge_2110/best.pt  (= v13)
-  train maps  maps-all   21 maps, live seven held at 60% (--live-share 0.6)
-  gate maps   maps-live   7 maps -- a gate score still means ladder strength
+  train maps  maps-all   23 maps, live NINE held at 60% (--live-share 0.6)
+  gate maps   maps-live   9 maps -- a gate score still means ladder strength
   league      gen4 (frozen), devtest_2050, v12, v10, sabotage, shink_r1
   critic      runs/team_critic/pretrained.pt  (refit, see below)
 ```
 `maps-all/` is derived and gitignored: `cp maps/*.map maps-gen/*.map maps-all/`.
-Stop with `touch runs/ratchet2/STOP` (exits at the next decision point) or kill the group.
+Stop with `touch runs/ratchet3/STOP` (exits at the next decision point, i.e. end of a
+150M-turn segment) or `kill -- -$(cat runs/ratchet3/supervisor.pid)` for immediate.
+Dashboard: `.venv-train/bin/python -m train.dash --run runs/ratchet3 --port 8770 --host 0.0.0.0`.
+
+**ratchet2 was stopped 15 min into gen 1** (kept at `runs/ratchet2_abandoned`) because two
+new maps were published and an env fixes its map list at construction. Nothing was lost.
+
+## THE MAZE MAPS (stronghold, trauma -- published 2026-09-23, both 48x24)
+These are a game mode the old rotation did not contain. Path distance from a team-0 spawn
+to the nearest team-1 spawn vs the straight-line torus distance:
+```
+  stronghold  165 steps / 14 straight = x11.8 detour
+  trauma       98        / 14         = x7.0
+  devil        34        /  7         = x4.9   <- previous worst
+  schooltime    7        /  7         = x1.0
+```
+In the ratchet3 gen0 baseline, **all 72 stronghold games ran the full 500 rounds with
+exactly 0.0 kills** for all six opponents: the teams are fully connected (BFS mirroring
+`tile_after_step` says ~100% reachable) but never meet, so the result is the
+longest-dragon tiebreak. Pearl density is NOT the cause (18%/12% of tiles spawn, vs
+schooltime 13%).
+
+gen0 scored **0.13 on stronghold and 0.72 on trauma** -- they nearly cancel, so the
+summary number hides a total failure. **Read the per-map `cells` in the gate JSON.**
+Next-run candidate (NOT applied): a maze generator in `mapgen.py` so the 40% invented
+share teaches long-detour navigation.
+
+## gen0 baseline moved when the maps did
+```
+              7 maps   9 maps
+  shink_r1     0.702    0.602
+  sabotage     0.655    0.556
+  v12          0.607    0.528
+  gen4         0.583    0.565
+  v10          0.548    0.569
+  devtest_2050 0.452    0.500
+  mean         0.591    0.553   (108 games each, se 0.048)
+```
+Sponge still leads the league (0.553 over 648 games is ~2.7 se) but by about half as much.
 
 ## v13 is on the ladder
 Sponge sub-2110 clone, uploaded 2026-09-23, all six checks passed (69M of the judge's
@@ -40,8 +78,10 @@ likely pay. Refit between generations if `calib_ev` drifts.
 - `cpp/bc_memory.hpp`; gate `tests/parity_memory.py` = 144,000 turns, max diff **0** vs the
   Python MemoryTracker. `wasmprobe` check 3 now compares all 708 and passes, so
   `mybot/memory.hpp` and `bc_memory.hpp` agree independently.
-- Cost: rollout 235,190 -> 188,945 turns/s (**-20%**, ~16% per PPO iteration). The Python
-  tracker was 22.8k turns/s and 26 MB an env, i.e. 8.3x worse and ~26 GB at 1024 envs.
+- Cost: the raw-rollout microbenchmark said 235,190 -> 188,945 turns/s (-20%). **End to end
+  that did not materialise**: ratchet3 runs at 37.8k t/s against the pre-memory run's 34.5k.
+  Do not quote the -16%/-20% figure as a PPO cost; measure the run. The Python tracker was
+  22.8k turns/s and 26 MB an env, i.e. 8.3x worse and ~26 GB at 1024 envs.
 - **Any 14-scalar checkpoint must be widened first**: `train.migrate_scalars` zero-pads the
   scalar layer, which leaves play identical. `runs/anchors708/` holds the migrated league.
 - **gen4 is preserved exactly**, as the user required: 192,000 turns in the 708 env,
@@ -69,11 +109,15 @@ likely pay. Refit between generations if `calib_ev` drifts.
   not what it should be. Fix before the next recording.
 - `imitate2.py:218` throws a benign `.item()` UserWarning; one `.detach()` fixes it.
 - The dashboard shows the anchor as **"gen0 (ft6 113M)"**, hardcoded in `ratchet.py`'s
-  `init_state`. ratchet2's seed is the sponge 2110 clone, so the label is wrong. It lives in
+  `init_state`. ratchet3's seed is the sponge 2110 clone, so the label is wrong. It lives in
   `state.json`, which the running supervisor rewrites, so it cannot be corrected without
   restarting the run. Make it derive from `--start` before the next new run.
-- `finetune_team.py` still feeds the critic full-width scalars; it will need the same slice
-  `ratchet_train.py` got if it is used again.
+- ~~`finetune_team.py` full-width scalars~~ **fixed** (commit 2f90404): both the trainable
+  critic and `--freeze-team` now slice to their own `scalar[0].weight.shape[1]`, and
+  `--resume` sizes the rebuild from the checkpoint instead of `bcsim.N_SCALARS`.
+- **While a run is live, `ratchet.py`, `ratchet_train.py` and anything they import
+  (`team_critic.py`, `augment.py`, `net.py`, `rollout.py`) are OFF LIMITS**: the supervisor
+  spawns them as fresh subprocesses each segment and each gate, so an edit lands mid-run.
 
 ---
 # Handoff — 2026-09-23 ~11:55: memory is in the simulator; PPO ready to restart
@@ -91,10 +135,10 @@ likely pay. Refit between generations if `calib_ev` drifts.
 
 **Launch line for the next run:**
 ```
-cd bcsim && setsid nohup /usr/bin/python3 -u -m train.ratchet run --run ../runs/ratchet2 \
+cd bcsim && setsid nohup /usr/bin/python3 -u -m train.ratchet run --run ../runs/ratchet3 \
     --start ../runs/anchors708/gen4.pt \
     --train-maps ../maps --live-maps ../maps-live --live-share 0.6 --gate-maps ../maps-live \
-    --segment-turns 150000000 >> ../runs/ratchet2/supervisor.out 2>&1 < /dev/null &
+    --segment-turns 150000000 >> ../runs/ratchet3/supervisor.out 2>&1 < /dev/null &
 ```
 `--train-maps ../maps` is the 12; add `maps-gen` by copying both into one directory (build_pool
 takes a single dir). Every league path must come from `runs/anchors708/`, not the originals:
@@ -144,7 +188,7 @@ which is the argument for the wider training pool.
 - `wormhole` is the weakest of the new maps (42-round games); watch it in training.
 - `imitate2.py:218` throws a benign `.item()` UserWarning; one `.detach()` fixes it.
 - The dashboard shows the anchor as **"gen0 (ft6 113M)"**, hardcoded in `ratchet.py`'s
-  `init_state`. ratchet2's seed is the sponge 2110 clone, so the label is wrong. It lives in
+  `init_state`. ratchet3's seed is the sponge 2110 clone, so the label is wrong. It lives in
   `state.json`, which the running supervisor rewrites, so it cannot be corrected without
   restarting the run. Make it derive from `--start` before the next new run.
 
