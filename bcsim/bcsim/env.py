@@ -62,6 +62,10 @@ CHANNELS = ["pearl", "pearl_time", "never_spawn", "self_head", "self_body",
             "kelp_fwd", "kelp_right", "kelp_back", "kelp_left",
             "portal_fwd", "portal_right", "portal_back", "portal_left",
             "self_index", "self_tail"]
+# The BASE scalars, indices 0-13. N_SCALARS above is the full row the env
+# writes: these, then mem (676) and memfar (18) from cpp/bc_memory.hpp. The base
+# ones never move, so a net trained before memory widens with zero columns and
+# plays identically (train/migrate_scalars.py).
 SCALARS = ["round", "length", "length_raw", "units", "face_n", "face_e", "face_s", "face_w",
            "head_x", "head_y", "map_w", "map_h", "num_msgs", "team_b"]
 REWARD_COMPS = ["length_delta", "pearls", "sprint_cost", "split_cost", "died",

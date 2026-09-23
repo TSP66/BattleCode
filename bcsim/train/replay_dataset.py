@@ -43,6 +43,9 @@ SPLIT_K = [2, 3, 4, 5, 6, 8, 12, 16, -1]      # CODEC_SPLIT_K, -1 = len // 2
 N_MOVES = 3 + 9 + 27
 FACE = ["face_n", "face_e", "face_s", "face_w"]
 SC = {n: i for i, n in enumerate(bcsim.SCALARS)}
+# bcsim.SCALARS names the base scalars; N_SCALARS is the full row, which also
+# carries mem and memfar (bc_memory.hpp)
+N_BASE_SCALARS = len(bcsim.SCALARS)
 
 
 def encode(turn, facing: int, length: int) -> tuple[int, int]:
@@ -114,7 +117,10 @@ def convert(game_json: pathlib.Path, out_dir: pathlib.Path, team_id: int) -> dic
             if a < 0:
                 unrepresentable += 1
             keep["local"].append(obs.local[0].astype(np.float16))
-            keep["scalar"].append(obs.scalar[0].copy())
+            # only the base scalars: bcsim now appends mem and memfar
+            # (bc_memory.hpp), but clone_cache.py's layout is the 14, and
+            # clone_features.py rebuilds the remembered inputs from the planes
+            keep["scalar"].append(obs.scalar[0, :N_BASE_SCALARS].copy())
             keep["msgs"].append(obs.msgs[0].copy())
             keep["mask"].append(obs.mask[0].copy())
             keep["action"].append(a)
