@@ -1,3 +1,126 @@
+# Handoff — 2026-09-24 morning: every earlier league number is suspect
+
+## READ THIS FIRST: the evaluation harness was lying
+
+`yardstick.greedy` captured a CUDA graph per network. Capturing a *second* graph
+corrupts the *first*: it replays against memory it no longer owns. Same pair, 72
+games on maps-live:
+
+| | graphs on | graphs off |
+|---|---|---|
+| gen1 vs gen4 | **0.0000** | **0.5972 ± 0.058** |
+
+In the broken runs the learner acts on 46k rows against its opponent's 513k,
+because its swarm never grows -- it plays badly from the first turn. A mirror
+match (one net, one callable on both sides, so only one graph is ever captured)
+scores exactly 0.5000 per map; the corruption needs a second capture.
+
+It surfaced because a distilled net "scored" a 0.941 league mean, beating six
+opponents 1.0000. The control that settled it: **gen1 scored 1.0000 against
+itself.**
+
+Nothing cheap fixed it -- not a shared memory pool, not thread_local capture, not
+a static output tensor, not warming up on the capture stream, not disabling the
+autocast weight cache -- so the graphs are gone (commit 618b9da6). Eager is 154s
+for 72 games on nine maps.
+
+**Consequence: every gate and league number in the rest of this file, and every
+`gates/*.json` in runs/ratchet4, came through that path and cannot be trusted.**
+That includes the seg0/seg1 league table below and the promotion of gen1. Re-measure
+before relying on any of it.
+
+## Architecture: planes beat recurrence, and both are level with the flat net
+
+`train/roundrobin.py` (new) plays every saved agent against every other and fits
+Bradley-Terry to the whole matrix, because a gate against one anchor cannot tell
+"better" from "better against that anchor". Pooled over both halves, 72 games a
+pair, maps-live:
+
+```
+  pyramid  vs convlstm   0.646 +/- 0.056     planes beat recurrence, 2.6 se
+  pyramid  vs gen1       0.500               level with the flat teacher
+  convlstm vs gen1       0.597               beats the teacher the pyramid draws
+```
+Non-transitive, so read the Bradley-Terry fit in runs/roundrobin_arch.json.
+
+Distillation from the same teacher (gen1), matched turns, near-identical params:
+
+```
+  pyramid   0.96M params   6.1M turns   KL 0.088   top-1 agree 0.872
+  convlstm  0.97M params   6.1M turns   KL 0.113   top-1 agree 0.852
+```
+
+**Caveat on the ConvLSTM:** its state is detached between turns, so gradients say
+how the state it already has affects this turn's logits, not how a turn's input
+should shape the state for later. That is a one-step objective and a floor on
+what recurrence can do. Real truncated BPTT needs the graph held across several
+of a dragon's turns, which interleave with ~30 others in the same env.
+
+## The judge charges by the loop, not by the MAC
+
+3.3 points per MAC in a convolution, ~15 in a dot-product loop. Pricing per kind
+reproduces the meter to 0.14% (deployed 64x4: 69,099,514 predicted vs 69,000,000
+measured). `train/budget.py` prices any real module by forward hook.
+
+```
+  flat 64x4 (deployed)   69.1M points   69% of cap
+  pyramid 48x3/24x2      51.2M points   51% of cap,  29.8M spare
+  ConvLSTM 24ch@15       60.9M points   61% of cap,  20.1M spare
+  the same state dense    2,916M points  29x OVER the cap
+```
+**A structured LSTM is 114x cheaper than a flat one of the same capacity.** That
+is the only reason recurrence fits at all.
+
+## Sonar under 1.0.0 — see SONAR.md
+
+- **`PROTOCOL 3` gates everything and is printed every turn**, not once. `mybot/`
+  prints no PROTOCOL line, so every version submitted so far speaks the legacy
+  protocol.
+- **Echoes carry no bearing.** The five counts sum to the number of sonars sent,
+  so each ray stops on one thing. Broadcasting all four directions gives a
+  histogram and throws the direction away; one direction gives a clean reading.
+- **The enemy receives our messages** (own 18, ally 255, enemy 234 in one game).
+- Our simulator: legacy path **byte-identical**; protocol 3 exact on a kelp-free
+  map, **~7% out on maps with kelp** (we say kelp where the engine says a dragon).
+  Six hypotheses falsified with numbers in SONAR.md.
+- Echo features are wired in behind `BattlecodeVecEnv(sonar=True)`, off by default
+  because broadcasting changes what opponents see through SC_NUM_MSGS.
+
+## The 64-bit message: the bits are not the bottleneck
+
+`train/memcodec.py`, 120k planes from real play, variance recovered beyond the mean:
+
+```
+  56 bits, decoder sees the child's window   62.2%
+  56 bits, blind to it                       55.8%
+   8 bits, decoder sees the child's window   50.9%
+```
+**Eight bits get halfway; the other 48 buy 11 points.** Per channel the code
+carries terrain and history (remembered-age 0.93, pearl countdown 0.86, kelp 0.74)
+and **not enemies** (0.20 near, 0.09 far). A message should say where the parent
+has been, not where it saw an enemy.
+
+## Critic rebuilt, not yet trained
+
+`train/critic_net.py`: board trunk (11 planes of 64x64, 64->32->16->8) plus the
+7x7 window, learnable team embeddings for both sides, sinusoidal round and
+training-iteration encodings, EMA weights and dropout against the
+overfit-then-collapse we have already seen. 4.27M params, 56.5M MAC a row.
+Data: 19,247 games across 17 team folders. Cap with `--max-games` (the full set is
+~1.08M positions, ~12.5 GB in memory).
+
+## What is NOT done
+
+- Message *timing* does not match the engine, so the codec cannot be deployed as
+  measured. The echo path is fine.
+- The critic is built and its path verified end to end, but **not pretrained**.
+- No PPO run has been started (the user asked for none).
+- Deployment for the pyramid: `export_cpp.py`, `mybot/net.hpp`, `obs.hpp`,
+  `memory.hpp` all still assume the flat architecture.
+- Real BPTT for the ConvLSTM.
+
+---
+
 # Handoff — 2026-09-23 ~18:15: ratchet4 RUNNING, gen1 PROMOTED
 
 ## Running now
