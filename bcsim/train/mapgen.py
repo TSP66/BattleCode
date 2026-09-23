@@ -184,7 +184,22 @@ def corridor() -> Map:
 
 
 def wormhole() -> Map:
-    """Portals as the structure, not decoration: no official map does this."""
+    """DISABLED -- not in BUILDERS. Portals as structure is a real gap, but no
+    version of this map has worked.
+
+    At one portal per row and no kelp, random play ended games in 25 rounds
+    against 131-422 on every other map: dragons were flung into each other
+    constantly. Adding kelp along the two portal walls to make a portal a route
+    rather than one opening among many made it worse in a new way -- it boxes
+    each team into an 8-wide strip whose only exit is a portal, and the portal
+    lands you in the ENEMY's strip, so a dragon that leaves home dies at once.
+    Under trained sampled play that is 5-round games and ~1 recorded position
+    each (2026-09-23).
+
+    A working version needs portals that are a shortcut rather than a delivery
+    into enemy territory: pair edges within one side of the map, or across the
+    corners, so crossing one keeps you on your own half.
+    """
     m = Map("Wormhole", 32, 32, "xy")
     for y in range(m.h):
         for x in range(m.w):
@@ -288,7 +303,8 @@ def capped() -> Map:
     return m
 
 
-BUILDERS = [famine, glut, duel, hive, corridor, wormhole, choke, ring, drift, capped]
+# wormhole is deliberately absent: see its docstring. Nine maps, not ten.
+BUILDERS = [famine, glut, duel, hive, corridor, choke, ring, drift, capped]
 
 
 def main() -> None:
