@@ -61,7 +61,10 @@ def write_hash(out: pathlib.Path) -> None:
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--data", required=True)
-    p.add_argument("--submission", type=int, required=True)
+    p.add_argument("--submission", required=True,
+                   help="one submission id, or several with loss weights: "
+                        "\"2050:1,1302:0.5\". Several write sub_weight.npy, which "
+                        "imitate2.py reads with --weights sub_weight")
     p.add_argument("--holdout", type=float, default=0.1)
     p.add_argument("--out", required=True)
     p.add_argument("--hash", action="store_true",
@@ -73,19 +76,30 @@ def main() -> None:
         return
     out.mkdir(parents=True, exist_ok=True)
 
+    # "2050:1,1302:0.5" keeps both submissions and weights their rows; a bare
+    # "2050" is the old single-submission cache, with every row at weight 1
+    subs = {}
+    for part in str(a.submission).split(","):
+        sid, _, w = part.partition(":")
+        subs[int(sid)] = float(w) if w else 1.0
+
     index = {r["game"]: r for r in map(json.loads, (data / "index.jsonl").read_text().splitlines())}
     files = sorted(data.glob("*.npz"), key=lambda f: int(f.stem))
     sub_of = {f: index[int(f.stem)]["submission"] for f in files}
     held = held_out(files, sub_of, a.holdout)
-    games = [f for f in files if sub_of[f] == a.submission]
+    games = [f for f in files if sub_of[f] in subs]
     n = sum(index[int(f.stem)]["samples"] for f in games)
+    for sid, w in subs.items():
+        g = [f for f in games if sub_of[f] == sid]
+        print(f"  submission {sid} at weight {w}: {len(g)} games, "
+              f"{sum(index[int(f.stem)]['samples'] for f in g):,} samples", flush=True)
     print(f"{len(games)} games, {n:,} samples before filtering", flush=True)
 
     spec = {"local": (np.uint8, (23, 7, 7)), "scalar": (np.float32, (14,)),
             "msgs": (np.uint32, (4,)), "mask": (np.uint8, (48,)),
             "action": (np.int16, ()), "alt": (np.int16, ()), "dragon": (np.int32, ()),
             "round": (np.int16, ()), "game": (np.int32, ()), "won": (np.float32, ()),
-            "keep": (np.bool_, ())}
+            "keep": (np.bool_, ()), "sub_weight": (np.float32, ())}
     mm = {k: np.lib.format.open_memmap(out / f"{k}.npy", "w+", dt, (n,) + sh)
           for k, (dt, sh) in spec.items()}
     at = 0
@@ -101,6 +115,7 @@ def main() -> None:
             mm[k][s] = d[k]
         mm["game"][s] = int(f.stem)
         mm["won"][s] = float(d["won"])
+        mm["sub_weight"][s] = subs[sub_of[f]]
         # imitate.py's rule: drop what our action space cannot learn, keep a
         # dragon with no legal action at all
         act, mask = d["action"].astype(np.int64), d["mask"]
@@ -116,8 +131,8 @@ def main() -> None:
         v.flush()
     val_games = sorted(int(f.stem) for f in games if int(f.stem) in held)
     (out / "meta.json").write_text(json.dumps(
-        {"submission": a.submission, "samples": n, "games": [int(f.stem) for f in games],
-         "val_games": val_games}))
+        {"submission": max(subs, key=subs.get), "submissions": {str(k): v for k, v in subs.items()},
+         "samples": n, "games": [int(f.stem) for f in games], "val_games": val_games}))
     write_hash(out)
     print(f"done: {n:,} samples, {len(val_games)} held-out games", flush=True)
 
