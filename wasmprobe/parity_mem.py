@@ -28,7 +28,10 @@ sys.path.insert(0, str(ROOT / "bcsim"))
 import bcsim                                        # noqa: E402
 from train.clone_features import MemoryTracker      # noqa: E402
 
-C, S, A = bcsim.N_CHANNELS, bcsim.N_SCALARS, bcsim.N_ACTIONS
+# S is the BASE scalar count, which is what the dump puts before the remembered
+# block. bcsim.N_SCALARS is the full row now that cpp/bc_memory.hpp appends mem
+# and memfar to it, so using that here would make `extra` come out zero.
+C, S, A = bcsim.N_CHANNELS, len(bcsim.SCALARS), bcsim.N_ACTIONS
 N_MEM, N_FAR = 4 * 13 * 13, 18
 TOL = 1e-6          # both sides are float32 of the same arithmetic
 
