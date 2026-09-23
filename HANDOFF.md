@@ -68,6 +68,10 @@ likely pay. Refit between generations if `calib_ev` drifts.
   mixture playing itself rather than two policies contesting. Data is valid, the design is
   not what it should be. Fix before the next recording.
 - `imitate2.py:218` throws a benign `.item()` UserWarning; one `.detach()` fixes it.
+- The dashboard shows the anchor as **"gen0 (ft6 113M)"**, hardcoded in `ratchet.py`'s
+  `init_state`. ratchet2's seed is the sponge 2110 clone, so the label is wrong. It lives in
+  `state.json`, which the running supervisor rewrites, so it cannot be corrected without
+  restarting the run. Make it derive from `--start` before the next new run.
 - `finetune_team.py` still feeds the critic full-width scalars; it will need the same slice
   `ratchet_train.py` got if it is used again.
 
@@ -139,6 +143,10 @@ which is the argument for the wider training pool.
   position does not predict clone strength, so it is worth measuring rather than assuming.
 - `wormhole` is the weakest of the new maps (42-round games); watch it in training.
 - `imitate2.py:218` throws a benign `.item()` UserWarning; one `.detach()` fixes it.
+- The dashboard shows the anchor as **"gen0 (ft6 113M)"**, hardcoded in `ratchet.py`'s
+  `init_state`. ratchet2's seed is the sponge 2110 clone, so the label is wrong. It lives in
+  `state.json`, which the running supervisor rewrites, so it cannot be corrected without
+  restarting the run. Make it derive from `--start` before the next new run.
 
 ---
 # Handoff — 2026-09-23 ~10:05: ratchet PAUSED, cloning the top 3, round robin queued
