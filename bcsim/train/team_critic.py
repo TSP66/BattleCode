@@ -381,6 +381,15 @@ def pretrain(a) -> None:
     files = sorted(DATA.glob("*.npz"))
     if not files:
         raise SystemExit(f"no positions in {DATA}; run `extract` first")
+    # Everything is held in memory, and a board is 9.2 KB a position even packed,
+    # so the whole scrape does not fit: ~1.1M positions is ~12.5 GB. Cap by
+    # *games*, not positions, because the outcome label is per game and a random
+    # subset of games keeps the held-out split (which is a hash of the game id)
+    # representative.
+    if a.max_games and len(files) > a.max_games:
+        pick = np.random.default_rng(0).choice(len(files), a.max_games, replace=False)
+        files = [files[i] for i in sorted(pick)]
+        print(f"capped to {len(files)} games of the scrape", flush=True)
     # sized first and filled in place: a list-and-concatenate load would hold
     # the whole set twice, and it is several GB
     sizes = {"tr": 0, "va": 0}
@@ -546,6 +555,9 @@ def main() -> None:
                    help="in the fuse; the critic has overfitted and then collapsed before")
     t.add_argument("--ema", type=float, default=0.999,
                    help="decay of the weight average that is evaluated and saved")
+    t.add_argument("--max-games", type=int, default=0,
+                   help="cap how many games are loaded; 0 means all (they must fit "
+                        "in memory, and a packed board is 9.2 KB a position)")
     t.add_argument("--eval-batch", type=int, default=1024,
                    help="the board trunk needs more memory a row than the old critic did")
     sp = sub.add_parser("selfplay", help="games on maps replays never cover")
