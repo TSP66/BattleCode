@@ -33,7 +33,7 @@ import torch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 import bcsim                                    # noqa: E402
-from train.net import ActorCritic, masked_logits   # noqa: E402
+from train.net import ActorCritic, PyramidActorCritic, masked_logits   # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]  # repo root
 
@@ -43,11 +43,19 @@ PORTAL = bcsim.REWARD_COMPS.index("portal")
 
 
 def load_net(path: str | pathlib.Path, dev: torch.device) -> tuple[ActorCritic, dict]:
+    """`args["arch"]` picks the architecture; absent means the flat net, which
+    is every checkpoint written before the pyramid existed."""
     ck = torch.load(path, map_location=dev, weights_only=False)
     a = ck["args"]
-    net = ActorCritic(bcsim.N_CHANNELS, bcsim.N_SCALARS, bcsim.N_ACTIONS,
-                      width=a["width"], blocks=a["blocks"],
-                      hidden=next(v for k, v in ck["net"].items() if k.endswith("fuse.0.weight")).shape[0]).to(dev)
+    hidden = next(v for k, v in ck["net"].items() if k.endswith("fuse.0.weight")).shape[0]
+    if a.get("arch") == "pyramid":
+        net = PyramidActorCritic(bcsim.N_CHANNELS, bcsim.WIDE_CH, bcsim.N_ACTIONS,
+                                 near_width=a["near_width"], near_blocks=a["near_blocks"],
+                                 wide_width=a["wide_width"], wide_blocks=a["wide_blocks"],
+                                 wide_side=bcsim.WIDE_SIDE, hidden=hidden).to(dev)
+    else:
+        net = ActorCritic(bcsim.N_CHANNELS, bcsim.N_SCALARS, bcsim.N_ACTIONS,
+                          width=a["width"], blocks=a["blocks"], hidden=hidden).to(dev)
     net.load_state_dict({k.replace("_orig_mod.", ""): v for k, v in ck["net"].items()})
     net.eval()
     return net, ck
@@ -62,21 +70,26 @@ def greedy(net, dev, max_batch: int = 0):
     two swarms), so kernel launch latency, worse still on a GPU that training
     keeps busy, is most of the cost; a graph replay is a single launch.
     """
+    wants = getattr(net, "wants_wide", False)
     if not max_batch:
-        def act(local, scalar, mask):
+        def act(local, scalar, mask, wide=None):
             with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-                logits, _ = net(torch.from_numpy(local).to(dev), torch.from_numpy(scalar).to(dev))
+                logits, _ = net(torch.from_numpy(local).to(dev), torch.from_numpy(scalar).to(dev),
+                                torch.from_numpy(wide).to(dev) if wants else None)
                 m = torch.from_numpy(mask).to(dev).bool()
                 return masked_logits(logits.float(), m).argmax(dim=1).to(torch.int32).cpu().numpy()
+        act.wants_wide = wants
         return act
 
     s_local = torch.zeros(max_batch, bcsim.N_CHANNELS, bcsim.WINDOW, bcsim.WINDOW, device=dev)
     s_scalar = torch.zeros(max_batch, bcsim.N_SCALARS, device=dev)
     s_mask = torch.ones(max_batch, bcsim.N_ACTIONS, dtype=torch.bool, device=dev)
+    s_wide = (torch.zeros(max_batch, bcsim.WIDE_CH, bcsim.WIDE_SIDE, bcsim.WIDE_SIDE, device=dev)
+              if wants else None)
 
     def body():
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            logits, _ = net(s_local, s_scalar)
+            logits, _ = net(s_local, s_scalar, s_wide)
         return masked_logits(logits.float(), s_mask).argmax(dim=1).to(torch.int32)
 
     with torch.inference_mode():
@@ -92,29 +105,38 @@ def greedy(net, dev, max_batch: int = 0):
     pin_l = torch.zeros(max_batch, bcsim.N_CHANNELS, bcsim.WINDOW, bcsim.WINDOW, pin_memory=True)
     pin_s = torch.zeros(max_batch, bcsim.N_SCALARS, pin_memory=True)
     pin_m = torch.ones(max_batch, bcsim.N_ACTIONS, dtype=torch.uint8, pin_memory=True)
+    pin_w = (torch.zeros(max_batch, bcsim.WIDE_CH, bcsim.WIDE_SIDE, bcsim.WIDE_SIDE,
+                         pin_memory=True) if wants else None)
 
-    def act(local, scalar, mask):
+    def act(local, scalar, mask, wide=None):
         k = len(local)
         if k > max_batch:
             raise ValueError(f"{k} rows > graph batch {max_batch}")
         pin_l.numpy()[:k] = local
         pin_s.numpy()[:k] = scalar
         pin_m.numpy()[:k] = mask
+        if wants:
+            pin_w.numpy()[:k] = wide
         with torch.inference_mode():
             s_local.copy_(pin_l, non_blocking=True)
             s_scalar.copy_(pin_s, non_blocking=True)
             s_mask.copy_(pin_m.bool(), non_blocking=True)
+            if wants:
+                s_wide.copy_(pin_w, non_blocking=True)
             graph.replay()
             return s_out[:k].cpu().numpy()
+    act.wants_wide = wants
     return act
 
 
-def _call(fn, obs, rows):
+def _call(fn, obs, rows, wide=None):
     """An act callable on the chosen rows. A stateful one (a policy with
     memory, see clone_eval.py) gets the whole observation and the row mask,
     since it has to know which dragon of which game each row is."""
     if getattr(fn, "stateful", False):
         return fn.rows(obs, rows)
+    if getattr(fn, "wants_wide", False):
+        return fn(obs.local[rows], obs.scalar[rows], obs.mask[rows], wide[rows])
     return fn(obs.local[rows], obs.scalar[rows], obs.mask[rows])
 
 
@@ -134,8 +156,10 @@ def evaluate(learner, opponents: list[dict], maps: list[str], map_names: list[st
               for mi in range(len(maps)) for side in (0, 1)
               for _ in range(max(1, games // 2))]
     n = len(layout)
+    any_wide = any(getattr(f, "wants_wide", False)
+                   for f in [learner] + [o.get("act") for o in opponents] if f is not None)
     env = bcsim.BattlecodeVecEnv(maps, num_envs=n, num_threads=threads, seed=seed,
-                                 closure_capacity=max(8192, n * 160))
+                                 closure_capacity=max(8192, n * 160), wide=any_wide)
     learner_team = np.array([side for _, _, side in layout], np.int8)
     opp_of = np.array([o for o, _, _ in layout])
     for i, (o, mi, side) in enumerate(layout):
@@ -166,11 +190,11 @@ def evaluate(learner, opponents: list[dict], maps: list[str], map_names: list[st
         mine = obs.team == learner_team
         acts = np.zeros(n, np.int32)
         if mine.any():
-            acts[mine] = _call(learner, obs, mine)
+            acts[mine] = _call(learner, obs, mine, env.wide)
         for o in net_opps:
             rows = (~mine) & (opp_of == o)
             if rows.any():
-                acts[rows] = _call(opponents[o]["act"], obs, rows)
+                acts[rows] = _call(opponents[o]["act"], obs, rows, env.wide)
         # portal usage is only counted against bots: there every closure is the
         # learner's, whereas against a network both sides' turns close
         turns += mine & (done < per_side) & is_bot
