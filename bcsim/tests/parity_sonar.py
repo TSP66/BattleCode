@@ -1,0 +1,154 @@
+"""Our sonar against the engine's, turn by turn, block for block.
+
+probe_sonar.py established what the engine does. This checks that we do the
+same thing: the reference engine and our text simulator are driven in lockstep
+with identical replies, and every round block is compared byte for byte. That
+covers NUM_MSGS and the 64-bit payloads, the ECHOES line and its five counts,
+and the fact that ECHOES only appears once a team has declared protocol 3.
+
+The policy deliberately broadcasts in all four directions, splits often enough
+to make allies, and picks moves that keep dragons alive, because a sonar rule
+that is only exercised on an empty board is not exercised at all.
+
+    python tests/parity_sonar.py [map ...]
+"""
+
+from __future__ import annotations
+
+import ctypes
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+from oracle import OracleGame                   # noqa: E402
+from probe_sonar import parse, payload, safe_dirs, DIRS   # noqa: E402
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+LIB = ctypes.CDLL(str(pathlib.Path(__file__).resolve().parents[1]
+                      / "bcsim" / "libbctext.so"))
+LIB.bct_create.restype = ctypes.c_void_p
+LIB.bct_create.argtypes = [ctypes.c_char_p, ctypes.c_uint, ctypes.c_char_p, ctypes.c_int]
+LIB.bct_destroy.argtypes = [ctypes.c_void_p]
+LIB.bct_next.argtypes = [ctypes.c_void_p]
+LIB.bct_dragon_id.argtypes = [ctypes.c_void_p, ctypes.c_int]
+LIB.bct_round_block.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+LIB.bct_reply.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_char_p]
+
+
+class TextSim:
+    # The engine seeds its pearl countdowns with this fixed value, and a
+    # parity run has to match it or every countdown differs.
+    DEFAULT_SEED = 1592614637
+
+    def __init__(self, map_text: str, seed: int = DEFAULT_SEED):
+        err = ctypes.create_string_buffer(256)
+        self.h = LIB.bct_create(map_text.encode(), seed, err, len(err))
+        if not self.h:
+            raise SystemExit(f"bct_create: {err.value.decode()}")
+        self.buf = ctypes.create_string_buffer(1 << 16)
+
+    def next(self) -> int:
+        return LIB.bct_next(ctypes.c_void_p(self.h))
+
+    def dragon_id(self, di: int) -> int:
+        return LIB.bct_dragon_id(ctypes.c_void_p(self.h), di)
+
+    def block(self, di: int) -> str:
+        n = LIB.bct_round_block(ctypes.c_void_p(self.h), di, self.buf, len(self.buf))
+        return self.buf.raw[:n].decode()
+
+    def reply(self, di: int, text: str) -> None:
+        LIB.bct_reply(ctypes.c_void_p(self.h), di, text.encode())
+
+    def close(self) -> None:
+        LIB.bct_destroy(ctypes.c_void_p(self.h))
+
+
+def run(map_text: str, protocol: int) -> dict:
+    """protocol 3 declares it every turn; 2 never does, so ECHOES must stay away."""
+    sim = TextSim(map_text)
+    st = {"turns": 0, "diff": 0, "first": None, "echo_turns": 0, "msg_turns": 0,
+          "echo_nonzero": 0, "msgs": 0, "desync": 0}
+
+    def policy(did: int, text: str) -> str:
+        b = parse(text)
+        st["turns"] += 1
+        if b["echoes"] is not None:
+            st["echo_turns"] += 1
+            if any(b["echoes"]):
+                st["echo_nonzero"] += 1
+        if b["msgs"]:
+            st["msg_turns"] += 1
+            st["msgs"] += len(b["msgs"])
+
+        di = sim.next()
+        if di < 0 or sim.dragon_id(di) != did:
+            st["desync"] += 1
+        else:
+            ours = sim.block(di)
+            if ours != text and st["diff"] == 0:
+                st["first"] = (did, b["round"], ours, text)
+            st["diff"] += int(ours != text)
+
+        reply = [f"SONAR {d} {payload(did, k)}" for k, d in enumerate(DIRS)]
+        ok = safe_dirs(b)
+        if b["length"] >= 6 and (b["round"] % 7) == 0:
+            reply.append(f"SPLIT {b['length'] // 2}")
+        else:
+            reply.append(f"MOVE {ok[0] if ok else b['dir']}")
+        if protocol >= 3:
+            reply.append(f"PROTOCOL {protocol}")
+        reply.append("ENDTURN")
+        out = "\n".join(reply) + "\n"
+        if di >= 0:
+            sim.reply(di, out)
+        return out
+
+    g = OracleGame(map_text, policy)
+    try:
+        g.run()
+    except Exception as ex:
+        st["error"] = f"{type(ex).__name__}: {ex}"
+    sim.close()
+    return st
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    maps = ([pathlib.Path(a) for a in args] if args else
+            sorted((ROOT / "maps-official").glob("*.map")))
+    bad = 0
+    for protocol in (3, 2):
+        print(f"\n### bots declaring PROTOCOL {protocol}"
+              + ("" if protocol >= 3 else " (never declared: ECHOES must not appear)"))
+        for mp in maps:
+            st = run(mp.read_text(), protocol)
+            ok = st["diff"] == 0 and st["desync"] == 0 and "error" not in st
+            if protocol >= 3:
+                ok = ok and st["echo_turns"] > 0
+            else:
+                ok = ok and st["echo_turns"] == 0
+            bad += not ok
+            note = ""
+            if "error" in st:
+                note = "  " + st["error"]
+            print(f"  {mp.stem:22s} {st['turns']:6d} turns  blocks differing "
+                  f"{st['diff']:4d}  echo turns {st['echo_turns']:6d} "
+                  f"(non-zero {st['echo_nonzero']:5d})  messages {st['msgs']:5d}"
+                  f"  {'ok' if ok else 'FAIL'}{note}")
+            if st["first"]:
+                did, rnd, ours, theirs = st["first"]
+                print(f"    first difference, dragon {did} round {rnd}:")
+                for a, b in zip(ours.split("\n"), theirs.split("\n")):
+                    if a != b:
+                        print(f"      ours   {a!r}")
+                        print(f"      engine {b!r}")
+                        break
+    print("\n" + ("sonar matches the engine" if not bad else f"{bad} map(s) FAILED"))
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

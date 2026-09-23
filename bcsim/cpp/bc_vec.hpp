@@ -550,6 +550,7 @@ private:
         const int di = e.acting;
         Dragon& d = e.game.dragons[di];
         d.inbox.clear();
+        for (int k = 0; k < SONAR_ECHO_KINDS; k++) d.echo[k] = 0;
         e.game.events.clear();
         e.events_seen = 0;
 

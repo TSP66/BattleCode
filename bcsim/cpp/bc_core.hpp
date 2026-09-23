@@ -63,6 +63,13 @@ struct MT19937 {
 
 // ---------------------------------------------------------------- map data
 enum EdgeKind : uint8_t { EDGE_OPEN = 0, EDGE_KELP = 1, EDGE_PORTAL = 2 };
+
+// The five counts of the protocol-3 ECHOES line, in its order.
+enum SonarEcho : uint8_t {
+    SE_KELP = 0, SE_ALLY = 1, SE_ALLY_HEAD = 2, SE_ENEMY = 3, SE_ENEMY_HEAD = 4,
+    SONAR_ECHO_KINDS = 5
+};
+constexpr int SONAR_DIRS = 4;          // one message per cardinal direction a turn
 enum Symmetry : uint8_t { SYM_NONE = 0, SYM_FLIP_Y = 1, SYM_FLIP_X = 2, SYM_ROT180 = 3 };
 
 struct PortalTarget {  // partner edge of a portal edge
@@ -170,7 +177,25 @@ struct Dragon {
 
     std::vector<int16_t> ring;
     int start = 0, len = 0, mask = 0;
-    std::vector<uint32_t> inbox;
+    // Protocol 3 carries the whole word; the legacy form capped it at 32 bits.
+    //
+    // A message is delivered the moment the ray lands, and every inbox is
+    // emptied at the *round* boundary -- not when the dragon reads it. So a
+    // dragon hears what was cast earlier in the same round, before its own
+    // turn, and never hears what was cast after it. Measured both ways against
+    // the engine (tests/parity_sonar.py): clearing per turn delivers a round
+    // late, and holding everything to the boundary delivers a round early.
+    std::vector<uint64_t> inbox;
+    // What this dragon's own sonars hit, in the order of the ECHOES line:
+    // kelp, ally, ally_head, enemy, enemy_head. Each ray lands in exactly one,
+    // so these sum to the number of sonars sent -- measured against the engine,
+    // see SONAR.md. Filled while the dragon acts and reported in its next block.
+    int32_t echo[SONAR_ECHO_KINDS] = {};
+    // The protocol this dragon has declared. It is per dragon, not per team:
+    // the engine runs one bot instance per dragon (it spawns them by dragon id),
+    // so a dragon born from a split starts on the legacy protocol until its own
+    // first reply declares otherwise.
+    uint8_t protocol = 2;
 
     void reserve_ring(int want) {
         int cap = 8;
@@ -498,9 +523,19 @@ struct Game {
         if (record_events) events.push_back({EV_SPLIT, dragons[di].id, c.id, k, 0});
     }
 
-    // SONAR: a ray from the head along the current facing, through portals and
-    // around the wrap, stopping at kelp or the first living dragon.
-    void cast_sonar(int di, uint32_t value) {
+    // SONAR: a ray from the head along `facing`, through portals and around the
+    // wrap, stopping at kelp or the first living dragon.
+    //
+    // Under protocol 3 the direction is chosen rather than taken from the
+    // dragon's facing, the payload is a full 64 bits, and the ray reports back:
+    // whatever it stopped on is counted into the sender's `echo`. Measured
+    // against the reference engine (SONAR.md): each ray lands in exactly one of
+    // the five categories, so the counts sum to the number of sonars sent, and
+    // a kelp edge stops the ray before a dragon on the far side of it.
+    //
+    // Whoever the ray stops on receives the message -- ally, enemy or, when the
+    // ray wraps the torus, the sender itself. There is no privacy here.
+    void cast_sonar(int di, char facing, uint64_t value) {
         const MapData& m = *map;
         Dragon& d = dragons[di];
         const int limit = m.w + m.h;
@@ -508,19 +543,50 @@ struct Game {
         int x = d.head() % m.w, y = d.head() / m.w;
         for (int i = 1; i <= limit; i++) {
             int nx, ny;
-            if (!tile_after_step(m, x, y, d.facing, nx, ny)) { stats[ST_SONAR_LOST]++; return; }  // kelp: lost
+            if (!tile_after_step(m, x, y, facing, nx, ny)) {
+                stats[ST_SONAR_LOST]++;
+                d.echo[SE_KELP]++;
+                return;
+            }
             x = nx; y = ny;
             const int16_t occ = owner[m.idx(x, y)];
-            if (occ >= 0) {
-                stats[ST_SONAR_HIT]++;
+            // Under protocol 3 a dragon's own body is transparent to its own
+            // sonar: the ray goes straight through and neither stops there nor
+            // delivers. Measured against the engine -- a dragon whose southward
+            // ray runs down its own tail is told "kelp", where counting the tail
+            // would have said "ally" (tests/parity_sonar.py).
+            //
+            // The legacy protocol does *not* do this: the ray stops on the
+            // sender's own body and the sender receives its own message, which
+            // is what tests/test_vecenv.py checks against the engine. So this is
+            // one of the things 1.0.0 changed, not a rule we had wrong before.
+            if (occ >= 0 && !(occ == di && d.protocol >= 3)) {
                 if (occ == di) stats[ST_SONAR_SELF]++;
+                stats[ST_SONAR_HIT]++;
+                const bool head = head_at[m.idx(x, y)] != 0;
+                const bool ally = dragons[occ].team == d.team;
+                d.echo[ally ? (head ? SE_ALLY_HEAD : SE_ALLY)
+                            : (head ? SE_ENEMY_HEAD : SE_ENEMY)]++;
                 dragons[occ].inbox.push_back(value);
-                if (record_events) events.push_back({EV_SONAR_HIT, d.id, dragons[occ].id, (int32_t)value, 0});
+                if (record_events)
+                    events.push_back({EV_SONAR_HIT, d.id, dragons[occ].id,
+                                      (int32_t)(uint32_t)value, 0});
                 return;
             }
         }
+        // Nothing in w + h steps. On a torus a straight ray comes back to its
+        // own body long before this, so it takes a short dragon on an empty
+        // line to get here; the engine's behaviour in this case is unmeasured,
+        // and no category is counted.
         stats[ST_SONAR_LOST]++;
     }
+
+    // The legacy protocol-2 form: along the dragon's own facing, 32 bits.
+    void cast_sonar(int di, uint32_t value) {
+        cast_sonar(di, dragons[di].facing, (uint64_t)value);
+    }
+
+
 
     // ---- outcome, exactly ResultAfterRound
     void settle(bool force_end) {

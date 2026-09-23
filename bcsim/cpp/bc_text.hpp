@@ -171,7 +171,16 @@ inline std::string render_round_block(const Game& g, int di) {
     out += "LENGTH " + std::to_string(d.len) + "\n";
     out += "UNIT_COUNT " + std::to_string(g.alive[d.team]) + "\n";
     out += "NUM_MSGS " + std::to_string(d.inbox.size()) + "\n";
-    for (uint32_t v : d.inbox) out += std::to_string(v) + "\n";
+    for (uint64_t v : d.inbox) out += std::to_string(v) + "\n";
+    // ECHOES sits between the messages and the tiles, and only for a team that
+    // has declared protocol 3. It is always present for such a team, all zeros
+    // when nothing was sent (SONAR.md).
+    if (d.protocol >= 3) {
+        out += "ECHOES";
+        for (int k = 0; k < SONAR_ECHO_KINDS; k++)
+            out += " " + std::to_string(d.echo[k]);
+        out += "\n";
+    }
 
     for (int dy = -VISION; dy <= VISION; dy++)
         for (int dx = -VISION; dx <= VISION; dx++) {
@@ -234,9 +243,25 @@ struct Reply {
     uint8_t kind = ACT_SUICIDE;
     std::vector<char> dirs;
     int split = 0;
-    bool has_sonar = false;
+    bool has_sonar = false;            // legacy "SONAR <uint32>", along the facing
     uint32_t sonar = 0;
+    // protocol 3: "SONAR <N|E|S|W> <uint64>", one payload per direction, all
+    // four sendable in the same turn
+    bool send_dir[SONAR_DIRS] = {};
+    uint64_t sonar_dir[SONAR_DIRS] = {};
+    // the bot declares this every turn, not once at startup (SONAR.md)
+    int protocol = 0;                  // 0 = not declared this turn
 };
+
+inline int sonar_dir_index(char c) {
+    switch (c) {
+        case 'N': return 0;
+        case 'E': return 1;
+        case 'S': return 2;
+        case 'W': return 3;
+        default: return -1;
+    }
+}
 
 inline bool is_space(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r';
@@ -265,6 +290,28 @@ inline bool scan_integer(const char* p, const char*& end, bool is_signed, uint32
     (void)is_signed;
     uint32_t truncated = (uint32_t)v;
     out = neg ? (uint32_t)(0u - truncated) : truncated;
+    return true;
+}
+
+// The 64-bit payload of a protocol-3 sonar, read the way scan_integer reads a
+// 32-bit one: leading space, optional sign, digits, saturating in the widest
+// unsigned type and then truncating.
+inline bool scan_integer64(const char* p, const char*& end, uint64_t& out) {
+    while (is_space(*p)) p++;
+    bool neg = false;
+    if (*p == '+' || *p == '-') { neg = (*p == '-'); p++; }
+    if (*p < '0' || *p > '9') return false;
+    uint64_t v = 0;
+    bool saturated = false;
+    while (*p >= '0' && *p <= '9') {
+        const int digit = *p - '0';
+        if (v > (0xFFFFFFFFFFFFFFFFull - (uint64_t)digit) / 10ull) saturated = true;
+        if (!saturated) v = v * 10ull + (uint64_t)digit;
+        p++;
+    }
+    end = p;
+    if (saturated) v = 0xFFFFFFFFFFFFFFFFull;
+    out = neg ? (uint64_t)(0ull - v) : v;
     return true;
 }
 
@@ -318,11 +365,30 @@ inline Reply parse_reply(const std::string& text) {
             r.kind = ACT_SPLIT;
             r.split = (int32_t)v;
         } else if (cmd == "SONAR") {
+            // Two forms: "SONAR <dir> <uint64>" (protocol 3) and the legacy
+            // "SONAR <uint32>" along the facing. Tell them apart by whether the
+            // first argument is a direction letter.
+            const char* q = p;
+            while (is_space(*q)) q++;
+            const int dirx = sonar_dir_index(*q);
+            if (dirx >= 0 && (is_space(q[1]) || q[1] == '\0')) {
+                const char* end = nullptr;
+                uint64_t v;
+                if (!scan_integer64(q + 1, end, v) || !rest_is_blank(end)) continue;
+                r.send_dir[dirx] = true;
+                r.sonar_dir[dirx] = v;
+            } else {
+                const char* end = nullptr;
+                uint32_t v;
+                if (!scan_integer(p, end, false, v) || !rest_is_blank(end)) continue;
+                r.has_sonar = true;
+                r.sonar = v;
+            }
+        } else if (cmd == "PROTOCOL") {
             const char* end = nullptr;
             uint32_t v;
             if (!scan_integer(p, end, false, v) || !rest_is_blank(end)) continue;
-            r.has_sonar = true;
-            r.sonar = v;
+            r.protocol = (int)v;
         }
         // INDICATOR, LOG, DOT and LINE only affect the replay.
     }
@@ -336,7 +402,23 @@ inline void apply_reply(Game& g, int di, const Reply& r) {
         case ACT_SPLIT: g.split(di, r.split); break;
         default:        g.kill(di, DEATH_ACTION); break;
     }
-    if (r.has_sonar && g.dragons[di].alive) g.cast_sonar(di, r.sonar);
+    // A bot declares its protocol on every turn, so the engine learns it from
+    // the reply. It is per dragon: the engine runs one bot instance per dragon.
+    if (r.protocol > 0) g.dragons[di].protocol = (uint8_t)r.protocol;
+    if (!g.dragons[di].alive) return;
+    // Cast after the action, from where the dragon ends its turn: casting from
+    // the pre-move position was tested against the engine and lands the rays on
+    // different dragons.
+    if (r.has_sonar) g.cast_sonar(di, r.sonar);
+    // The directed form exists only in protocol 3; a dragon that has not
+    // declared it gets nothing from a "SONAR N <value>" line. Directions in a
+    // fixed order, so sending all four gives the same echo whatever order they
+    // were printed in.
+    if (g.dragons[di].protocol >= 3) {
+        static const char DIR_OF[SONAR_DIRS] = {'N', 'E', 'S', 'W'};
+        for (int k = 0; k < SONAR_DIRS; k++)
+            if (r.send_dir[k]) g.cast_sonar(di, DIR_OF[k], r.sonar_dir[k]);
+    }
 }
 
 // A game stepped one dragon turn at a time, the way the engine drives bots.
@@ -373,6 +455,7 @@ struct TurnDriver {
 
     void finish_turn(int di, const Reply& r) {
         g.dragons[di].inbox.clear();
+        for (int k = 0; k < SONAR_ECHO_KINDS; k++) g.dragons[di].echo[k] = 0;
         apply_reply(g, di, r);
         cursor = di + 1;
     }
