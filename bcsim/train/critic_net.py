@@ -162,6 +162,44 @@ def team_value(logits: torch.Tensor) -> torch.Tensor:
     return p[..., 0] - p[..., 2]
 
 
+# ------------------------------------------------------------------ storage
+# A board is 11 planes of 64x64. Ten of them are 0/1 and one (how soon a pearl
+# is due) is a byte, so stored raw a position costs 45 KB and a few hundred
+# thousand of them do not fit in memory. Bit-packing the binary planes brings
+# that to 9.2 KB, and the unpack is one call on the GPU per minibatch.
+#
+# Note what is *not* done here: the positions are not thinned by storing a
+# coarser board. The labels are game-level -- every position in a game shares
+# one outcome -- so information about results is bounded by the number of games,
+# not positions, and the cheap axis is to record fewer turns per game. See the
+# --keep argument of team_critic extract.
+N_BINARY_PLANES = 10           # planes 0-9; plane 10 is the pearl countdown
+
+
+def board_pack(board: "object") -> tuple:
+    """(B, CH, S, S) uint8 -> (packed bits, countdown plane), both uint8."""
+    import numpy as np
+    b = np.asarray(board)
+    bits = np.packbits((b[:, :N_BINARY_PLANES] != 0).reshape(len(b), -1), axis=1)
+    return bits, b[:, N_BINARY_PLANES:].copy()
+
+
+def board_unpack(bits, tail, ch: int, side: int, device=None) -> torch.Tensor:
+    """Inverse of board_pack, as float in [0, 1] ready for the conv trunk.
+
+    The countdown plane is scaled by 1/255; the rest are already 0 or 1.
+    """
+    bits = torch.as_tensor(bits, device=device)
+    tail = torch.as_tensor(tail, device=device)
+    n = bits.shape[0]
+    cells = side * side
+    flat = ((bits.unsqueeze(-1) >> torch.arange(7, -1, -1, device=bits.device)) & 1)
+    planes = flat.reshape(n, -1)[:, :N_BINARY_PLANES * cells].float()
+    planes = planes.reshape(n, N_BINARY_PLANES, side, side)
+    rest = tail.reshape(n, ch - N_BINARY_PLANES, side, side).float() / 255.0
+    return torch.cat([planes, rest], dim=1)
+
+
 class TeamSlots:
     """Contest team id -> embedding slot, stable across runs once saved.
 

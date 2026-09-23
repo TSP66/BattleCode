@@ -43,7 +43,28 @@ os.environ.setdefault("BCSIM_LIB", str(pathlib.Path(__file__).resolve().parents[
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 OUT = ROOT / "runs/team_critic"
-TEAMS = ["vibing", "sss", "shink_ai_6500", "sabotage_d", "matcha_latte", "team"]
+# Positions written by this run. The board planes made the stored layout
+# different, and extract_one treats an existing file as already done, so new
+# data goes to its own directory rather than silently skipping every game that
+# the boardless extract had already covered.
+DATA = OUT / "data_board"
+def replay_teams() -> list[str]:
+    """Every team folder under runs/replays that actually holds replays.
+
+    This was a hand-written list of six, which quietly ignored the other five
+    folders on disk -- 6,000 games. What bounds the critic is how many *games*
+    it has seen, because every position in a game shares one outcome, so the
+    list is now whatever has been scraped, and a new scrape is picked up
+    without editing this file.
+    """
+    root = ROOT / "runs/replays"
+    if not root.is_dir():
+        return []
+    return sorted(d.name for d in root.iterdir()
+                  if d.is_dir() and any((d / "games").glob("*.replay")))
+
+
+TEAMS = replay_teams()
 N_PRIV = 8                                      # PRIV_COUNT in bc_vec.hpp
 # class index -> value, in units of the terminal reward
 OUTCOME_VALUE = (1.0, 0.0, -1.0)                # win, draw, loss
@@ -135,9 +156,10 @@ def extract_one(args):
     game_json, keep_p, seed = args
     import bcsim
     from bcsim.env import MAX_STEPS
+    from train.critic_net import board_pack
     from train.replay_read import read
     gid = int(game_json.stem)
-    dest = OUT / "data" / f"{gid}.npz"
+    dest = DATA / f"{gid}.npz"
     if dest.exists():
         return gid, "cached", 0
     try:
@@ -147,10 +169,19 @@ def extract_one(args):
     if rp.winner < 0 and rp.end_reason < 0:
         return gid, "no result", 0
     rng = np.random.default_rng(seed + gid)
+    # Which contest team played each side, for the critic's matchup embeddings.
+    # -1 is unknown, which is what a game with no metadata gets.
+    try:
+        meta = json.loads(game_json.read_text())
+        team_ids = (int(meta.get("teamAId", -1)), int(meta.get("teamBId", -1)))
+    except Exception:
+        team_ids = (-1, -1)
     env = bcsim.BattlecodeVecEnv([rp.map_text], num_envs=1, num_threads=1, seed=0,
-                                 random_pearl_seed=False, max_rounds=500, privileged=True)
+                                 random_pearl_seed=False, max_rounds=500, privileged=True,
+                                 board=True)
     obs = env.reset()
-    rec = {k: [] for k in ("local", "scalar", "priv", "round", "team", "outcome")}
+    rec = {k: [] for k in ("local", "scalar", "priv", "round", "team", "outcome",
+                           "board_bits", "board_tail", "team_self", "team_foe")}
     z = lambda dt, *s: np.zeros((1,) + s, dt)
     kind, nst, dirs, split = z(np.int8), z(np.int8), z(np.int8, MAX_STEPS), z(np.int16)
     send, value = z(np.int8), z(np.uint32)
@@ -162,11 +193,22 @@ def extract_one(args):
             break
         if rng.random() < keep_p:
             rec["local"].append(obs.local[0].astype(np.float16))
-            rec["scalar"].append(obs.scalar[0].copy())
+            # the base scalars only. The env's row is 708 wide now, but the
+            # extra 694 are the policy's flattened memory features and the
+            # critic has the whole board instead -- and the self-play path
+            # stores the base row, so both have to agree to be mixed.
+            rec["scalar"].append(obs.scalar[0][:len(bcsim.SCALARS)].copy())
             rec["priv"].append(obs.priv[0].copy())
             rec["round"].append(rnd)
             rec["team"].append(team)
             rec["outcome"].append(1 if rp.winner < 0 else (0 if rp.winner == team else 2))
+            bits, tail = board_pack(env.board[:1])
+            rec["board_bits"].append(bits[0])
+            rec["board_tail"].append(tail[0])
+            # the board is already written from the acting team's side, so
+            # "self" is whichever contest team that is
+            rec["team_self"].append(team_ids[team])
+            rec["team_foe"].append(team_ids[1 - team])
         kind[0] = t.kind if t.kind >= 0 else 2
         if len(t.dirs) > MAX_STEPS:
             status = "sprint over MAX_STEPS"
@@ -183,11 +225,15 @@ def extract_one(args):
     # whose result is known, so they are kept
     if not rec["round"]:
         return gid, "empty", 0
-    np.savez(dest, **{k: np.stack(v) for k, v in rec.items()
-                      if k in ("local", "scalar", "priv")},
-             **{k: np.array(v, np.int16) for k, v in rec.items()
-                if k in ("round", "team", "outcome")},
-             rounds=np.int16(rp.rounds))
+    np.savez_compressed(
+        dest,
+        **{k: np.stack(v) for k, v in rec.items()
+           if k in ("local", "scalar", "priv", "board_bits", "board_tail")},
+        **{k: np.array(v, np.int16) for k, v in rec.items()
+           if k in ("round", "team", "outcome")},
+        **{k: np.array(v, np.int32) for k, v in rec.items()
+           if k in ("team_self", "team_foe")},
+        rounds=np.int16(rp.rounds))
     return gid, status, len(rec["round"])
 
 
@@ -202,10 +248,11 @@ SELFPLAY_BASE = 900_000_000        # game ids well clear of any server battle id
 def selfplay(a) -> None:
     import torch
     import bcsim
+    from train.critic_net import board_pack
     from train.finetune import load_policy
     from train.net import masked_logits
 
-    (OUT / "data").mkdir(parents=True, exist_ok=True)
+    DATA.mkdir(parents=True, exist_ok=True)
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     nets = [load_policy(p_, dev)[0].eval() for p_ in a.ckpts.split(",") if p_]
     if not nets:
@@ -219,7 +266,7 @@ def selfplay(a) -> None:
     written = kept = 0
     for mi, (name, text) in enumerate(zip(names, texts)):
         env = bcsim.BattlecodeVecEnv([text], num_envs=a.envs, num_threads=a.threads,
-                                     seed=a.seed + mi, privileged=True)
+                                     seed=a.seed + mi, privileged=True, board=True)
         obs = env.reset()
         buf = [[] for _ in range(a.envs)]
         done_here = 0
@@ -233,10 +280,13 @@ def selfplay(a) -> None:
                 # game really visits, and greedy self-play repeats one line
                 act = torch.distributions.Categorical(logits=lg).sample()
             keep = rng.random(len(buf)) < a.keep
-            for e in np.flatnonzero(keep):
+            picked = np.flatnonzero(keep)
+            if len(picked):
+                bits, tail = board_pack(env.board[picked])
+            for j, e in enumerate(picked):
                 buf[e].append((obs.local[e].astype(np.float16),
                                obs.scalar[e][:n_base].copy(), obs.priv[e].copy(),
-                               int(obs.round[e]), int(obs.team[e])))
+                               int(obs.round[e]), int(obs.team[e]), bits[j], tail[j]))
             obs, _, st = env.step(act.to(torch.int32).cpu().numpy())
             for row in st.as_dicts():
                 e, winner, rounds = int(row["env"]), int(row["winner"]), int(row["rounds"])
@@ -244,25 +294,32 @@ def selfplay(a) -> None:
                 if not rec or done_here >= a.games:
                     continue
                 gid = SELFPLAY_BASE + mi * 100_000 + done_here
-                np.savez(OUT / "data" / f"{gid}.npz",
-                         local=np.stack([r[0] for r in rec]),
-                         scalar=np.stack([r[1] for r in rec]),
-                         priv=np.stack([r[2] for r in rec]),
-                         round=np.array([r[3] for r in rec], np.int16),
-                         team=np.array([r[4] for r in rec], np.int16),
-                         outcome=np.array([1 if winner < 0 else (0 if winner == r[4] else 2)
-                                           for r in rec], np.int16),
-                         rounds=np.int16(rounds))
+                np.savez_compressed(
+                    DATA / f"{gid}.npz",
+                    local=np.stack([r[0] for r in rec]),
+                    scalar=np.stack([r[1] for r in rec]),
+                    priv=np.stack([r[2] for r in rec]),
+                    round=np.array([r[3] for r in rec], np.int16),
+                    team=np.array([r[4] for r in rec], np.int16),
+                    outcome=np.array([1 if winner < 0 else (0 if winner == r[4] else 2)
+                                      for r in rec], np.int16),
+                    board_bits=np.stack([r[5] for r in rec]),
+                    board_tail=np.stack([r[6] for r in rec]),
+                    # self-play has no contest team on either side: both
+                    # unknown, which is the embedding slot that starts at zero
+                    team_self=np.full(len(rec), -1, np.int32),
+                    team_foe=np.full(len(rec), -1, np.int32),
+                    rounds=np.int16(rounds))
                 done_here += 1
                 kept += len(rec)
         env.close()
         written += done_here
         print(f"  {name:<14} {done_here} games", flush=True)
-    print(f"{written} games, {kept:,} positions into {OUT / 'data'}")
+    print(f"{written} games, {kept:,} positions into {DATA}")
 
 
 def extract(a) -> None:
-    (OUT / "data").mkdir(parents=True, exist_ok=True)
+    DATA.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(0)
     jobs, seen = [], set()
     for team in TEAMS:
@@ -318,19 +375,31 @@ def pretrain(a) -> None:
     import torch
     import torch.nn.functional as F
     import bcsim
+    from train.critic_net import BoardCritic, TeamSlots, board_unpack
     torch.cuda.set_per_process_memory_fraction(a.gpu_frac)
     dev = torch.device("cuda")
-    files = sorted((OUT / "data").glob("*.npz"))
+    files = sorted(DATA.glob("*.npz"))
+    if not files:
+        raise SystemExit(f"no positions in {DATA}; run `extract` first")
     # sized first and filled in place: a list-and-concatenate load would hold
     # the whole set twice, and it is several GB
     sizes = {"tr": 0, "va": 0}
     for f in files:
         sizes["va" if held_out(int(f.stem)) else "tr"] += len(np.load(f)["round"])
+    probe = np.load(files[0])
+    if "board_bits" not in probe.files:
+        raise SystemExit(f"{files[0]} has no board planes; this is data from the "
+                         f"boardless extract. Re-extract into {DATA}.")
     # the width the extract actually stored: bcsim's row grew to 708 when
     # bc_memory.hpp landed, and data written before that is still the base 14
-    n_scalars = int(np.load(files[0])["scalar"].shape[1])
+    n_scalars = int(probe["scalar"].shape[1])
+    n_bits = int(probe["board_bits"].shape[1])
+    tail_shape = tuple(probe["board_tail"].shape[1:])
+    board_side = tail_shape[-1]
     shapes = {"local": ((bcsim.N_CHANNELS, 7, 7), np.float16),
               "scalar": ((n_scalars,), np.float32), "priv": ((N_PRIV,), np.float32),
+              "board_bits": ((n_bits,), np.uint8), "board_tail": (tail_shape, np.uint8),
+              "team_self": ((), np.int32), "team_foe": ((), np.int32),
               "round": ((), np.int16), "outcome": ((), np.int16)}
     arrs = {s: {k: np.empty((n,) + sh, dt) for k, (sh, dt) in shapes.items()}
             for s, n in sizes.items()}
@@ -342,16 +411,41 @@ def pretrain(a) -> None:
         for k in shapes:
             arrs[s][k][fill[s]:fill[s] + m] = d[k]
         fill[s] += m
-    data = {s: {k: torch.from_numpy(v) for k, v in p.items()} for s, p in arrs.items()}
+
+    # Embedding slots are handed out over the training split only, in sorted id
+    # order so the table is the same whatever order the files came in. A team
+    # that appears only in held-out games stays unknown, which is what it would
+    # be on a team we have never played.
+    slots = TeamSlots()
+    for tid in sorted(set(arrs["tr"]["team_self"].tolist())
+                      | set(arrs["tr"]["team_foe"].tolist())):
+        slots.slot(tid, add=True)
+    for s in ("tr", "va"):
+        for k in ("team_self", "team_foe"):
+            arrs[s][k] = np.array([slots.slot(int(t)) for t in arrs[s][k]], np.int64)
+
+    data = {s: {k: torch.from_numpy(v) for k, v in p_.items()} for s, p_ in arrs.items()}
     tr, va = data["tr"], data["va"]
     n_va_games = sum(held_out(int(f.stem)) for f in files)
     print(f"{len(files)} games: {len(tr['round']):,} train positions, {len(va['round']):,} "
           f"held out ({n_va_games} games)", flush=True)
+    print(f"board {bcsim.BOARD_CH}x{board_side}x{board_side} packed to "
+          f"{n_bits + int(np.prod(tail_shape))} bytes a position; "
+          f"{len(slots)} contest teams have their own embedding", flush=True)
     base = np.bincount(tr["outcome"].numpy(), minlength=3) / len(tr["outcome"])
     print("outcome share (train) win/draw/loss", base.round(3), flush=True)
 
     torch.manual_seed(0)
-    net = build(bcsim.N_CHANNELS, n_scalars, 1, a.width, a.blocks).to(dev)
+    net = BoardCritic(bcsim.N_CHANNELS, n_scalars, 1, bcsim.BOARD_CH,
+                      board_side=board_side, n_priv=N_PRIV,
+                      near_width=a.width, near_blocks=a.blocks,
+                      dropout=a.dropout).to(dev)
+    print(f"{sum(q.numel() for q in net.parameters()):,} parameters", flush=True)
+    # An exponential moving average of the weights is what gets evaluated and
+    # saved. The failure this is here for is the one we have already hit: the
+    # critic fits, then falls off a cliff within an epoch. An average over
+    # recent steps does not follow it off.
+    ema = {k: v.detach().clone().float() for k, v in net.state_dict().items()}
     opt = torch.optim.AdamW(net.parameters(), lr=a.lr, weight_decay=a.wd)
     n = len(tr["round"])
     steps = a.epochs * ((n + a.batch - 1) // a.batch)
@@ -360,18 +454,30 @@ def pretrain(a) -> None:
 
     def fwd(d, idx):
         b = len(idx)
+        board = board_unpack(d["board_bits"][idx], d["board_tail"][idx],
+                             bcsim.BOARD_CH, board_side, device=dev)
         logits, _ = net(d["local"][idx].to(dev).float(), d["scalar"][idx].to(dev),
-                        ctx0[:b], d["priv"][idx].to(dev))
+                        ctx0[:b], d["priv"][idx].to(dev), board,
+                        team_self=d["team_self"][idx].to(dev),
+                        team_foe=d["team_foe"][idx].to(dev),
+                        iteration=None,
+                        rnd=d["round"][idx].to(dev).float())
         return logits
 
-    def evaluate():
+    def evaluate(use_ema: bool = True):
+        backup = None
+        if use_ema:
+            backup = {k: v.detach().clone() for k, v in net.state_dict().items()}
+            net.load_state_dict({k: v.to(backup[k].dtype) for k, v in ema.items()})
         net.eval()
         ps = []
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-            for s in range(0, len(va["round"]), 4096):
-                idx = torch.arange(s, min(s + 4096, len(va["round"])))
+            for s in range(0, len(va["round"]), a.eval_batch):
+                idx = torch.arange(s, min(s + a.eval_batch, len(va["round"])))
                 ps.append(fwd(va, idx).float().softmax(1).cpu())
         net.train()
+        if backup is not None:
+            net.load_state_dict(backup)
         return torch.cat(ps).numpy()
 
     y_va = va["outcome"].numpy()
@@ -392,6 +498,9 @@ def pretrain(a) -> None:
             torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
             opt.step()
             sched.step()
+            with torch.no_grad():
+                for k, v in net.state_dict().items():
+                    ema[k].mul_(a.ema).add_(v.detach().float(), alpha=1.0 - a.ema)
             tot += loss.detach().item() * len(idx)
         p = evaluate()
         ll = float(-np.log(p[np.arange(len(y_va)), y_va] + 1e-9).mean())
@@ -403,13 +512,17 @@ def pretrain(a) -> None:
         print(json.dumps(row), flush=True)
         if best is None or ll < best:
             best = ll
-            torch.save({"critic": net.state_dict(), "eval": row,
-                        "critic_args": {"width": a.width, "blocks": a.blocks, "n_context": 1,
-                                        "n_priv": N_PRIV}},
-                       OUT / "pretrained.pt")
-    (OUT / "pretrain_log.json").write_text(json.dumps(log, indent=1))
-    print(f"best held-out log loss {best:.4f} -> {OUT / 'pretrained.pt'}")
-
+            torch.save({"critic": {k: v for k, v in ema.items()}, "eval": row,
+                        "critic_args": {"width": a.width, "blocks": a.blocks,
+                                        "n_context": 1, "n_priv": N_PRIV,
+                                        "arch": "board", "board_ch": bcsim.BOARD_CH,
+                                        "board_side": board_side,
+                                        "dropout": a.dropout,
+                                        "team_slots": slots.as_dict()}},
+                       OUT / "pretrained_board.pt")
+    (OUT / "pretrain_board_log.json").write_text(json.dumps(log, indent=1))
+    print(f"best held-out log loss {best:.4f} (baseline {ll_base:.4f}) "
+          f"-> {OUT / 'pretrained_board.pt'}")
 
 def main() -> None:
     p = argparse.ArgumentParser()
@@ -429,6 +542,12 @@ def main() -> None:
                    help="label smoothing: a result read off a position is never certain")
     t.add_argument("--gpu-frac", type=float, default=0.15,
                    help="cap on this process's share of GPU memory (other jobs run)")
+    t.add_argument("--dropout", type=float, default=0.1,
+                   help="in the fuse; the critic has overfitted and then collapsed before")
+    t.add_argument("--ema", type=float, default=0.999,
+                   help="decay of the weight average that is evaluated and saved")
+    t.add_argument("--eval-batch", type=int, default=1024,
+                   help="the board trunk needs more memory a row than the old critic did")
     sp = sub.add_parser("selfplay", help="games on maps replays never cover")
     sp.add_argument("--ckpts", required=True, help="comma list of policies to play each other")
     sp.add_argument("--maps", required=True)

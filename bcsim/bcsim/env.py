@@ -61,6 +61,14 @@ if hasattr(_lib, "bcv_wide_shape"):
     WIDE_CH, WIDE_SIDE = _wide[0], _wide[1]
 else:
     WIDE_CH, WIDE_SIDE = 0, 0
+# the whole board for the privileged critic: BOARD_CH planes of
+# BOARD_MAX x BOARD_MAX (cpp/bc_obs.hpp). Only libbcvec_priv.so exports it.
+if hasattr(_lib, "bcv_board_shape"):
+    _board = (ctypes.c_int * 2)()
+    _lib.bcv_board_shape(_board)
+    BOARD_CH, BOARD_MAX = _board[0], _board[1]
+else:
+    BOARD_CH, BOARD_MAX = 0, 0
 # scripted opponents for evaluation, see cpp/bc_bots.hpp
 BOTS = [_lib.bcv_bot_name(i).decode() for i in range(_lib.bcv_bot_count())]
 
