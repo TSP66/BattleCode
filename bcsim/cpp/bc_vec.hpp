@@ -76,8 +76,11 @@ constexpr int MAX_MSGS = 4;
 // and the longest-dragon margin (see VecEnv::observe)
 constexpr int PRIV_COUNT = 8;
 // board planes: own body, own heads, enemy body, enemy heads, pearls,
-// inside-the-map, kelp on the north edge, kelp on the west edge
-constexpr int BOARD_CH = 8;
+// inside-the-map, kelp on the north edge, kelp on the west edge, then the
+// acting dragon's own body and head, and how soon a pearl is due per tile
+// (see VecEnv::observe). Only the critic reads these, and it never ships, so
+// they may say things a deployed bot cannot know.
+constexpr int BOARD_CH = 11;
 constexpr int BOARD_MAX = 64;
 // Steps a single MOVE action may carry. The engine has no cap of its own (a
 // sprint is limited by length), so replaying real games needs more:

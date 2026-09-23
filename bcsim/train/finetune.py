@@ -126,8 +126,12 @@ def load_policy(path: str, dev) -> tuple[ActorCritic, dict]:
     `args["arch"]` picks the architecture. Checkpoints written before the
     pyramid existed have no such key, which is the flat 708-scalar
     ActorCritic -- so every clone and league member still loads unchanged.
+
+    Read onto the host and moved to the device once full, for the reason given
+    in yardstick.load_net: parameters filled by a device-to-device copy break a
+    later CUDA graph capture.
     """
-    ck = torch.load(path, map_location=dev, weights_only=False)
+    ck = torch.load(path, map_location="cpu", weights_only=False)
     a = ck["args"]
     hidden = next(v for k, v in ck["net"].items() if k.endswith("fuse.0.weight")).shape[0]
     if a.get("arch") == "pyramid":
@@ -135,11 +139,12 @@ def load_policy(path: str, dev) -> tuple[ActorCritic, dict]:
             bcsim.N_CHANNELS, bcsim.WIDE_CH, bcsim.N_ACTIONS,
             near_width=a["near_width"], near_blocks=a["near_blocks"],
             wide_width=a["wide_width"], wide_blocks=a["wide_blocks"],
-            wide_side=bcsim.WIDE_SIDE, hidden=hidden).to(dev)
+            wide_side=bcsim.WIDE_SIDE, hidden=hidden)
     else:
         net = ActorCritic(bcsim.N_CHANNELS, bcsim.N_SCALARS, bcsim.N_ACTIONS,
-                          width=a["width"], blocks=a["blocks"], hidden=hidden).to(dev)
+                          width=a["width"], blocks=a["blocks"], hidden=hidden)
     net.load_state_dict({k.replace("_orig_mod.", ""): v for k, v in ck["net"].items()})
+    net.to(dev)
     return net, ck
 
 

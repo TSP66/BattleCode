@@ -44,20 +44,32 @@ PORTAL = bcsim.REWARD_COMPS.index("portal")
 
 def load_net(path: str | pathlib.Path, dev: torch.device) -> tuple[ActorCritic, dict]:
     """`args["arch"]` picks the architecture; absent means the flat net, which
-    is every checkpoint written before the pyramid existed."""
-    ck = torch.load(path, map_location=dev, weights_only=False)
+    is every checkpoint written before the pyramid existed.
+
+    The checkpoint is read onto the host and the net moved to the device once it
+    is full, rather than reading the weights straight onto the device and
+    copying them into place there. That ordering matters: a net whose parameters
+    were filled by a device-to-device `load_state_dict` makes a later
+    `torch.cuda.graph` capture hand back memory that faults on replay. Measured
+    on 2026-09-24 -- nine nets built by the constructor and captured replay
+    fine, the same nine loaded from checkpoints raise `an illegal memory access
+    was encountered` on the first replay, and loading via the host is what fixes
+    it. Dropping the checkpoint dict before capture does not, so it is the
+    device-side copy and not a live reference to the loaded tensors.
+    """
+    ck = torch.load(path, map_location="cpu", weights_only=False)
     a = ck["args"]
     hidden = next(v for k, v in ck["net"].items() if k.endswith("fuse.0.weight")).shape[0]
     if a.get("arch") == "pyramid":
         net = PyramidActorCritic(bcsim.N_CHANNELS, bcsim.WIDE_CH, bcsim.N_ACTIONS,
                                  near_width=a["near_width"], near_blocks=a["near_blocks"],
                                  wide_width=a["wide_width"], wide_blocks=a["wide_blocks"],
-                                 wide_side=bcsim.WIDE_SIDE, hidden=hidden).to(dev)
+                                 wide_side=bcsim.WIDE_SIDE, hidden=hidden)
     else:
         net = ActorCritic(bcsim.N_CHANNELS, bcsim.N_SCALARS, bcsim.N_ACTIONS,
-                          width=a["width"], blocks=a["blocks"], hidden=hidden).to(dev)
+                          width=a["width"], blocks=a["blocks"], hidden=hidden)
     net.load_state_dict({k.replace("_orig_mod.", ""): v for k, v in ck["net"].items()})
-    net.eval()
+    net.to(dev).eval()
     return net, ck
 
 

@@ -169,11 +169,21 @@ inline void VecEnv::observe(Env& e, int index) {
                     const bool own = g.dragons[occ].team == d.team;
                     const bool head = g.head_at[t] != 0;
                     bd[(own ? (head ? 1 : 0) : (head ? 3 : 2)) * plane + at] = 1;
+                    // Which of our dragons is acting. Planes 0-3 mark every
+                    // dragon of each side, so without these the critic sees
+                    // the position but not whose turn it is, and one board
+                    // would have to serve every dragon on it.
+                    if (occ == di) bd[(head ? 9 : 8) * plane + at] = 1;
                 }
                 bd[4 * plane + at] = g.pearl[t];
                 bd[5 * plane + at] = 1;
                 bd[6 * plane + at] = m.h_kind[t] == EDGE_KELP;
                 bd[7 * plane + at] = m.v_kind[t] == EDGE_KELP;
+                // When a pearl is due here, as nearness rather than delay:
+                // 255 is due now, small is far off, 0 is never. A countdown
+                // past 255 rounds is beyond any game, so it reads as never.
+                bd[10 * plane + at] = g.cd[t] < 0 ? 0
+                    : (uint8_t)(255 - std::min(g.cd[t], 255));
             }
     }
 

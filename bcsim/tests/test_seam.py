@@ -92,7 +92,7 @@ def play(map_text: str, w: int, h: int, seed: int) -> dict:
 
 def main() -> int:
     total = {"turns": 0, "seam_turns": 0, "seam_deaths": 0, "deaths": 0}
-    for path in sorted(ROOT / "maps".glob("*.map")):
+    for path in sorted((ROOT / "maps").glob("*.map")):
         text = path.read_text()
         first = next(l for l in text.splitlines() if l.startswith("MAP "))
         w, h = (int(v) for v in first.split()[1:3])
