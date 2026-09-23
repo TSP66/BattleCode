@@ -34,6 +34,8 @@ from __future__ import annotations
 import argparse
 import math
 
+import numpy as np
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -166,6 +168,176 @@ class RecurrentActorCritic(nn.Module):
         s = self.scalar(pyramid_scalars(scalar, self.n_scalars))
         z = self.fuse(torch.cat([n, m, s], dim=1))
         return self.pi(z), self.v(z).squeeze(-1), (h, c)
+
+
+ID_BITS = 12                      # uid = (episode << 12) | dragon_id, bc_vec.hpp
+ID_MASK = (1 << ID_BITS) - 1
+MAX_IDS = 1 << ID_BITS
+
+
+class StatePool:
+    """Hidden state per *dragon*, not per env slot.
+
+    A step of the env is one dragon's turn, so consecutive steps in the same env
+    slot belong to different dragons -- there are thirty-odd alive at once. A
+    recurrent policy therefore cannot keep its state in an (env, C, S, S) tensor
+    the way a normal vectorised environment lets it. State is kept in a pool and
+    a table maps (env, dragon id) to a slot, the same trick rollout.py uses to
+    chain a dragon's transitions. Slots are recycled when a dragon dies, so the
+    pool only has to be as big as the live population.
+
+    The pool also keeps each dragon's last head position and facing, which is
+    what lets the state be carried with it: the shift and rotation are derived
+    from the observation, so the env needs no new exports.
+    """
+
+    def __init__(self, num_envs: int, per_env: int, ch: int, side: int,
+                 device=None):
+        self.n = num_envs * per_env
+        self.ch, self.side = ch, side
+        self.h = torch.zeros(self.n, ch, side, side, device=device)
+        self.c = torch.zeros(self.n, ch, side, side, device=device)
+        self.slot = np.full((num_envs, MAX_IDS), -1, np.int32)
+        self.slot_uid = np.zeros((num_envs, MAX_IDS), np.int64)
+        self.owner = np.full(self.n, -1, np.int64)        # slot -> uid, for eviction
+        self.owner_env = np.full(self.n, -1, np.int32)
+        self.free = list(range(self.n))
+        self.prev_x = np.zeros(self.n, np.int32)
+        self.prev_y = np.zeros(self.n, np.int32)
+        self.prev_face = np.zeros(self.n, np.int8)
+        self.fresh = np.zeros(self.n, bool)              # no previous turn yet
+        self.evictions = 0
+        self.exhausted = 0
+
+    def _take(self, env: int, uid: int) -> int:
+        if not self.free:
+            # Should not happen with per_env at the unit limit, but a full pool
+            # must not corrupt another dragon's memory: drop this one's instead.
+            self.exhausted += 1
+            return -1
+        s = self.free.pop()
+        ids = uid & ID_MASK
+        self.slot[env, ids] = s
+        self.slot_uid[env, ids] = uid
+        self.owner[s] = uid
+        self.owner_env[s] = env
+        self.h[s].zero_()
+        self.c[s].zero_()
+        self.fresh[s] = True
+        return s
+
+    def slots_for(self, envs: np.ndarray, uids: np.ndarray) -> np.ndarray:
+        """Slot per row, allocating for a dragon seen for the first time."""
+        ids = (uids & ID_MASK).astype(np.int64)
+        have = self.slot[envs, ids]
+        stale = (have >= 0) & (self.slot_uid[envs, ids] != uids)
+        for k in np.flatnonzero(stale):          # id reused by a later episode
+            self.release_slot(int(have[k]))
+        out = np.where(stale, -1, have)
+        for k in np.flatnonzero(out < 0):
+            out[k] = self._take(int(envs[k]), int(uids[k]))
+        return out
+
+    def release_slot(self, s: int) -> None:
+        if s < 0 or self.owner[s] < 0:
+            return
+        env, uid = int(self.owner_env[s]), int(self.owner[s])
+        ids = uid & ID_MASK
+        if self.slot[env, ids] == s:
+            self.slot[env, ids] = -1
+        self.owner[s] = -1
+        self.owner_env[s] = -1
+        self.free.append(s)
+        self.evictions += 1
+
+    def release(self, envs: np.ndarray, uids: np.ndarray) -> None:
+        """Called with the closures of dragons whose episode ended."""
+        ids = (uids & ID_MASK).astype(np.int64)
+        have = self.slot[envs, ids]
+        ok = (have >= 0) & (self.slot_uid[envs, ids] == uids)
+        for s in have[ok]:
+            self.release_slot(int(s))
+
+    def carry(self, slots: np.ndarray, x: np.ndarray, y: np.ndarray,
+              face: np.ndarray, w: np.ndarray, hgt: np.ndarray):
+        """Roll each row's state to its new frame and return it, gathered.
+
+        The step is taken in world coordinates, wrapped on the torus, then
+        rotated into the dragon's new frame -- which is the frame `wide` is
+        written in, so the state stays registered with the observation.
+        """
+        sl = torch.as_tensor(slots, dtype=torch.long, device=self.h.device)
+        prev_f = self.prev_face[slots]
+        turns = ((prev_f.astype(np.int32) - face.astype(np.int32)) % 4)
+        dxw = x.astype(np.int32) - self.prev_x[slots]
+        dyw = y.astype(np.int32) - self.prev_y[slots]
+        # shortest way round the torus
+        dxw = np.where(dxw > w // 2, dxw - w, np.where(dxw < -(w // 2), dxw + w, dxw))
+        dyw = np.where(dyw > hgt // 2, dyw - hgt, np.where(dyw < -(hgt // 2), dyw + hgt, dyw))
+        # world delta -> the new ego frame (facing north is identity)
+        f = face.astype(np.int32)
+        ex = np.select([f == 0, f == 1, f == 2], [dxw, dyw, -dxw], default=-dyw)
+        ey = np.select([f == 0, f == 1, f == 2], [dyw, -dxw, -dyw], default=dxw)
+        # a dragon on its first turn has nothing to carry
+        first = self.fresh[slots]
+        ex = np.where(first, 0, -ex)
+        ey = np.where(first, 0, -ey)
+        turns = np.where(first, 0, turns)
+
+        h = self.h[sl]
+        c = self.c[sl]
+        big = max(self.side, 1)
+        ex = np.clip(ex, -big, big)
+        ey = np.clip(ey, -big, big)
+        # one gather per distinct (turn, dx, dy); there are only a handful a step
+        combos = {}
+        for i, key in enumerate(zip(turns.tolist(), ex.tolist(), ey.tolist())):
+            combos.setdefault(key, []).append(i)
+        for (k, sx, sy), rows in combos.items():
+            if k == 0 and sx == 0 and sy == 0:
+                continue
+            r = torch.as_tensor(rows, dtype=torch.long, device=h.device)
+            for t in (h, c):
+                v = t[r]
+                if k:
+                    v = torch.rot90(v, int(k), dims=(2, 3))
+                if sx or sy:
+                    v = torch.roll(v, shifts=(int(sy), int(sx)), dims=(2, 3))
+                    n = v.shape[-1]
+                    if sx > 0:
+                        v[:, :, :, :sx] = 0
+                    elif sx < 0:
+                        v[:, :, :, n + sx:] = 0
+                    if sy > 0:
+                        v[:, :, :sy, :] = 0
+                    elif sy < 0:
+                        v[:, :, n + sy:, :] = 0
+                t[r] = v
+        return h, c
+
+    def store(self, slots: np.ndarray, h, c, x: np.ndarray, y: np.ndarray,
+              face: np.ndarray) -> None:
+        sl = torch.as_tensor(slots, dtype=torch.long, device=self.h.device)
+        self.h[sl] = h.detach()
+        self.c[sl] = c.detach()
+        self.prev_x[slots] = x
+        self.prev_y[slots] = y
+        self.prev_face[slots] = face
+        self.fresh[slots] = False
+
+
+def head_and_face(scalar: np.ndarray) -> tuple:
+    """Absolute head cell and facing index, read back out of the base scalars.
+
+    bc_obs.hpp writes head_x / head_y divided by the map size and the facing as a
+    one-hot, so the env needs no extra exports for the state to be carried.
+    """
+    w = np.rint(scalar[:, 10] * 64.0).astype(np.int32)
+    h = np.rint(scalar[:, 11] * 64.0).astype(np.int32)
+    x = np.rint(scalar[:, 8] * np.maximum(w, 1)).astype(np.int32)
+    y = np.rint(scalar[:, 9] * np.maximum(h, 1)).astype(np.int32)
+    face = scalar[:, 4:8].argmax(1).astype(np.int8)
+    return x, y, face, w, h
 
 
 def main() -> None:
