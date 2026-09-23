@@ -66,7 +66,13 @@ def load_net(path: str | pathlib.Path, dev: torch.device) -> tuple[ActorCritic, 
     # on, or the frozen league stops being frozen.
     n_scalars = next(v for k, v in ck["net"].items()
                      if k.endswith("scalar.0.weight")).shape[1]
-    if a.get("arch") == "pyramid":
+    if a.get("arch") == "convlstm":
+        from train.recurrent import RecurrentActorCritic
+        net = RecurrentActorCritic(bcsim.N_CHANNELS, bcsim.WIDE_CH, bcsim.N_ACTIONS,
+                                   near_width=a["near_width"], near_blocks=a["near_blocks"],
+                                   hid_ch=a["hid_ch"], side=a.get("side", bcsim.WIDE_SIDE),
+                                   hidden=hidden, n_scalars=n_scalars)
+    elif a.get("arch") == "pyramid":
         net = PyramidActorCritic(bcsim.N_CHANNELS, bcsim.WIDE_CH, bcsim.N_ACTIONS,
                                  near_width=a["near_width"], near_blocks=a["near_blocks"],
                                  wide_width=a["wide_width"], wide_blocks=a["wide_blocks"],
@@ -120,6 +126,10 @@ def _call(fn, obs, rows, wide=None):
     memory, see clone_eval.py) gets the whole observation and the row mask,
     since it has to know which dragon of which game each row is."""
     if getattr(fn, "stateful", False):
+        # A recurrent policy needs the planes as well as the observation; an
+        # older stateful one (clone_eval) does not, so it is asked.
+        if getattr(fn, "wants_wide", False):
+            return fn.rows(obs, rows, wide)
         return fn.rows(obs, rows)
     if getattr(fn, "wants_wide", False):
         return fn(obs.local[rows], obs.scalar[rows], obs.mask[rows], wide[rows])

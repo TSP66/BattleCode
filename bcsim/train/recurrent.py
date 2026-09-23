@@ -357,6 +357,52 @@ def head_and_face(scalar: np.ndarray) -> tuple:
     return x, y, face, w, h
 
 
+class RecurrentGreedy:
+    """Argmax policy for a recurrent net, for yardstick.evaluate.
+
+    `evaluate` steps one dragon turn per env and hands a policy only the rows
+    whose turn it is, so a recurrent policy has to be stateful: it implements the
+    `rows` / `forget` contract that clone_eval.py established, keeping each
+    dragon's state in a StatePool and dropping an env's states when its episode
+    ends. Without this the network cannot be measured at all -- `greedy` has no
+    way to carry anything between turns.
+    """
+
+    stateful = True
+    wants_wide = True
+
+    def __init__(self, net, dev, num_envs: int, per_env: int = 96):
+        self.net = net
+        self.dev = dev
+        self.pool = StatePool(num_envs, per_env, net.hid_ch, net.side, device=dev)
+
+    def rows(self, obs, rows, wide):
+        from train.net import masked_logits
+        idx = np.flatnonzero(rows)
+        slots = self.pool.slots_for(idx, obs.uid[idx])
+        live = slots >= 0
+        out = np.zeros(len(idx), np.int32)
+        if not live.any():
+            return out
+        sl = slots[live]
+        keep = idx[live]
+        x, y, face, w, h = head_and_face(obs.scalar[keep])
+        hs, cs = self.pool.carry(sl, x, y, face, w, h)
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+            logits, _, (h2, c2) = self.net(
+                torch.from_numpy(obs.local[keep]).to(self.dev),
+                torch.from_numpy(obs.scalar[keep]).to(self.dev),
+                torch.from_numpy(wide[keep]).to(self.dev), (hs, cs))
+            m = torch.from_numpy(obs.mask[keep]).to(self.dev).bool()
+            act = masked_logits(logits.float(), m).argmax(1).to(torch.int32).cpu().numpy()
+        self.pool.store(sl, h2, c2, x, y, face)
+        out[live] = act
+        return out
+
+    def forget(self, env):
+        self.pool.release_envs(np.array([env]))
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
