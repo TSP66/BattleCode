@@ -109,12 +109,69 @@ either.
 Single-ray readings due north, 1607 turns: kelp 1106, ally body 260, ally head
 160, enemy body 43, enemy head 38.
 
+## The sender's own body
+
+**Under protocol 3 it is transparent.** A ray runs straight through the
+dragon's own segments: it neither stops there nor delivers a message. A dragon
+whose southward ray runs down its own tail is told `ECHOES 4 0 0 0 0` (four
+kelp), where counting the tail would have given `3 1 0 0 0`.
+
+**Under the legacy protocol it is not.** There the ray stops on the sender's own
+body and the sender receives its own message. `tests/test_vecenv.py` checks the
+legacy path against the engine and fails if this is changed, so it is one of the
+things 1.0.0 altered rather than something we had wrong.
+
+## Who receives
+
+Delivery is to **any segment**, not only a head: over one game, 501 rays stopped
+on a dragon (counted from the echoes) and exactly 501 messages were received.
+
+## Where our simulator still differs
+
+`tests/parity_sonar.py` drives the engine and our simulator in lockstep and
+compares every block. The legacy protocol is **byte-identical** on every map
+tried. Under protocol 3, driving *one* ray per turn instead of four makes the
+residual legible -- with four, the echo is a direction-less aggregate and cannot
+see a ray going the wrong way:
+
+| ray direction | turns | echo mismatches |
+|---|---|---|
+| along the dragon's own facing | 1611 | **0** |
+| fixed N | 1611 | 144 |
+| fixed E | 1611 | 121 |
+| fixed S | 1611 | 141 |
+| fixed W | 1611 | 126 |
+
+So the geometry, the stopping rules and the echo categories are **exactly right
+whenever the ray runs straight ahead**, and about 9% wrong when it runs anywhere
+else. The mismatches are lopsided: mostly we report `kelp` where the engine
+reports a hit on a head, so the engine's ray reaches something ours has already
+stopped at.
+
+Message *timing* is also not reproduced: aggregate counts agree, but individual
+messages land a round out on about half the turns of a small map.
+
+Tested and **wrong**, recorded so they are not tried again:
+
+- reading the direction letter in the dragon's own frame rather than as a
+  compass bearing (triples the mismatches, and breaks the facing case which is
+  currently exact -- that exactness is itself the evidence for absolute, since
+  the two readings agree there and nowhere else);
+- letting a ray hit the sender's own head after wrapping while still passing
+  through its body (no change at all);
+- casting from the pre-move rather than the post-move position;
+- three different models of when an inbox is cleared.
+
+**So the echo path is safe to train on and the message path is not**, which
+matters because the parent-to-child memory codec rides on the message path.
+
 ## Still unmeasured
 
 - The **point cost** of a `SONAR` line. Four lines a turn is four more writes
   worth of output unless the helper batches them; `SUBMITTING.md` records that
   output is metered at `READ_BYTE_COST` 6/byte and that one flushed write a turn
   is the budgeted case. **Meter this before broadcasting four a turn.**
-- How far a ray travels before giving up, and what it reports when it reaches
-  nothing — our own simulator uses `w + h` steps and calls it lost.
-- Whether a ray is blocked by the sender's own body.
+- Whether the engine's ray has a different length limit than our `w + h`, and
+  how it crosses portals. These are the two remaining candidates for the 9%.
+- Why 18 messages in one game decoded as coming from the receiver itself, when
+  protocol 3 makes a dragon's own body transparent to its own ray.
