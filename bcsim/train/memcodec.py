@@ -35,7 +35,30 @@ memory planes would be. A newborn's memory is empty; this gives it a prior.
 
 Both halves are metered: the encoder runs on the parent and the decoder on the
 child, both inside the judge's per-turn budget, so `--report-cost` prices them
-with train.budget before anything is trained.
+with train.budget before anything is trained. Encoder 3.3M points, decoder 14.8M,
+18.1M together against the 81M a turn available -- with the pyramid's 51.2M that
+is 69.3M, so it fits with 11.7M spare.
+
+Measured on 120,000 planes from real play, 10% held out, as the share of variance
+recovered that predicting the training mean leaves:
+
+    56 bits, decoder sees the child's window     62.2%
+    56 bits, decoder blind to it                 55.8%
+     8 bits, decoder sees the child's window     50.9%
+
+**Eight bits already get 50.9%, and the other forty-eight buy 11 points.** So the
+message channel is not the bottleneck and "use all 64 bits" is the wrong target:
+a newborn's memory is largely predictable from what it can see plus a little side
+information, and what is scarce is information the child cannot already infer --
+of which there is not 56 bits. Conditioning on the child's window is worth 6.4
+points, which is the reason it is built that way.
+
+Per channel at 56 bits, the code carries terrain and history well and enemies not
+at all: remembered-age 0.93 near / 0.87 far, pearl countdown 0.86 far, kelp 0.74
+near, visit recency 0.64 near -- against **0.20 for near enemy sightings and 0.09
+for far**. Enemy positions are sparse and stale within a few turns, so they do
+not survive compression. A message should carry terrain and where the parent has
+been, not where it last saw an enemy.
 """
 
 from __future__ import annotations
