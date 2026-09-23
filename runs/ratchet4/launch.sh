@@ -20,4 +20,6 @@ exec /usr/bin/python3 -u -m train.ratchet run \
     --gate-maps ../maps-live \
     --lr 1e-4 \
     --kl-coef 0.4 \
+    --extend-min 0.45 \
+    --max-drop 0.15 \
     --segment-turns 150000000
