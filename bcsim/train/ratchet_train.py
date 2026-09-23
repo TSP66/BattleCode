@@ -140,6 +140,8 @@ def main() -> None:
     opps = [frozen(x, dev) for x in opp_paths]
     # pretrained on replays with no opponent slots: its context input is unused
     tcrit, _ = team_critic.load(a.critic, dev, n_context=1)
+    # how many scalars that critic wants; bcsim's row is wider now
+    N_CRITIC_SCALARS = tcrit.scalar[0].weight.shape[1]
     tcrit.eval()
     for q in tcrit.parameters():
         q.requires_grad_(False)
@@ -286,8 +288,10 @@ def main() -> None:
             for s0 in range(0, T, 16):
                 sl = slice(s0, min(s0 + 16, T))
                 k = sl.stop - sl.start
+                # the frozen critic was pretrained on the base scalars, before
+                # bc_memory.hpp widened the row: give it the 14 it knows
                 tl, _ = tcrit(roll.local[sl].reshape(k * N, *roll.local.shape[2:]).float(),
-                              roll.scalar[sl].reshape(k * N, -1).float(),
+                              roll.scalar[sl].reshape(k * N, -1)[:, :N_CRITIC_SCALARS].float(),
                               zero_ctx.expand(k * N, 1), priv_buf[sl].reshape(k * N, -1))
                 probs[sl] = tl.float().softmax(-1).reshape(k, N, 3)
         t_roll = time.perf_counter() - t0
