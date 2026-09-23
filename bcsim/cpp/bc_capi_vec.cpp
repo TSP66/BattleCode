@@ -184,7 +184,7 @@ const char* bcv_bot_name(int k) { return bot_name(k); }
 void bcv_layout(int* out) {
     out[0] = LC_COUNT;
     out[1] = WINDOW;
-    out[2] = SC_COUNT;
+    out[2] = SC_TOTAL;   // 14 base + mem + memfar
     out[3] = MAX_MSGS;
     out[4] = CODEC_ACTIONS;
     out[5] = RW_COUNT;

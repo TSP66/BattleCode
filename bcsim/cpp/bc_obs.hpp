@@ -40,6 +40,9 @@ inline void VecEnv::observe(Env& e, int index) {
     const int facing = cfg_.egocentric ? dir_index(d.facing) : 0;
     const int hx = d.head() % m.w, hy = d.head() / m.w;
 
+    // what this dragon remembers, updated from the same window it is shown
+    DragonMemory& dm = e.mem_for(d.id, m.w, m.h);
+
     float* local = b_local_ + (size_t)index * LC_COUNT * WINDOW * WINDOW;
     memset(local, 0, sizeof(float) * LC_COUNT * WINDOW * WINDOW);
     auto at = [&](int channel, int row, int col) -> float& {
@@ -86,19 +89,23 @@ inline void VecEnv::observe(Env& e, int index) {
                 at(LC_FACE_N + shown, row, col) = 1.0f;
             }
 
+            bool kelp_here = false;
             for (int o_dir = 0; o_dir < 4; o_dir++) {
                 const int world_dir = (o_dir + facing) % 4;
                 bool vertical; int ex, ey;
                 edge_on_side(m, x, y, dir_char(world_dir), vertical, ex, ey);
                 const int edge = m.idx(ex, ey);
                 const uint8_t kind = vertical ? m.v_kind[edge] : m.h_kind[edge];
-                if (kind == EDGE_KELP) at(LC_KELP_N + o_dir, row, col) = 1.0f;
+                if (kind == EDGE_KELP) { at(LC_KELP_N + o_dir, row, col) = 1.0f; kelp_here = true; }
                 else if (kind == EDGE_PORTAL) at(LC_PORTAL_N + o_dir, row, col) = 1.0f;
             }
+            // MemoryTracker reads these three off the planes; taking them from
+            // the same game values avoids a float round-trip and is identical
+            dm.see(x, y, g.round, g.pearl[t] != 0, g.cd[t], kelp_here);
         }
 
-    float* sc = b_scalar_ + (size_t)index * SC_COUNT;
-    memset(sc, 0, sizeof(float) * SC_COUNT);
+    float* sc = b_scalar_ + (size_t)index * SC_TOTAL;
+    memset(sc, 0, sizeof(float) * SC_TOTAL);
     sc[SC_ROUND] = (float)g.round / (float)cfg_.max_rounds;
     sc[SC_LENGTH] = std::min(d.len, 64) / 64.0f;
     sc[SC_LENGTH_RAW] = (float)d.len;
@@ -110,6 +117,14 @@ inline void VecEnv::observe(Env& e, int index) {
     sc[SC_MAP_H] = (float)m.h / 64.0f;
     sc[SC_NUM_MSGS] = (float)std::min<size_t>(d.inbox.size(), MAX_MSGS);
     sc[SC_TEAM_B] = d.team == 1 ? 1.0f : 0.0f;
+
+    // the head's cell, then the remembered features -- in MemoryTracker's
+    // order: every window cell, then where the head stands, then read back.
+    // The ego frame uses the dragon's true facing, which is what the tracker
+    // takes from the one-hot face scalars, not this file's `facing` (which is
+    // zero when the window is not egocentric).
+    dm.stand(hx, hy, g.round);
+    dm.features(hx, hy, dir_index(d.facing), g.round, sc + SC_COUNT);
 
     uint32_t* msgs = b_msgs_ + (size_t)index * MAX_MSGS;
     for (int i = 0; i < MAX_MSGS; i++)

@@ -9,6 +9,7 @@
 
 #include "bc_text.hpp"
 #include "bc_bots.hpp"
+#include "bc_memory.hpp"
 
 #include <atomic>
 #include <cmath>
@@ -35,6 +36,15 @@ enum ScalarField {
     SC_ROUND = 0, SC_LENGTH, SC_LENGTH_RAW, SC_UNITS, SC_FACE_N, SC_FACE_E, SC_FACE_S, SC_FACE_W,
     SC_HEAD_X, SC_HEAD_Y, SC_MAP_W, SC_MAP_H, SC_NUM_MSGS, SC_TEAM_B, SC_COUNT
 };
+
+// The network's scalar input: the 14 above, then mem (676) and memfar (18)
+// from bc_memory.hpp, in the order imitate2.py concatenated them.
+//
+// The base 14 keep indices 0-13 and are never reordered or altered. That is
+// what lets a checkpoint trained before memory be widened with zero columns and
+// go on playing identically (train/migrate_scalars.py), so gen4 and the rest of
+// the league survive the switch as frozen opponents.
+constexpr int SC_TOTAL = SC_COUNT + mem_cfg::N_EXTRA;   // 708
 
 // Reward components. The caller supplies weights; nothing is baked in.
 //
@@ -164,6 +174,52 @@ struct Env {
     int len_lost[2] = {0, 0}, len_killed[2] = {0, 0};
     int headon[2] = {0, 0};      // kills where the killer died in the same collision
     uint64_t turn = 0;           // dragon turns taken in this env, for banking
+
+    // Per-dragon remembered map (bc_memory.hpp). Slots are pooled: dragon ids
+    // are handed out by dragons.size() and never reused inside an episode, and
+    // the vector only grows, so a 500-round game of splits and deaths would
+    // leak without reclaiming. A new dragon always gets a cleared slot, which
+    // is what makes a split child start empty -- the semantics the trainer and
+    // the deployed bot both assume.
+    std::vector<DragonMemory> mem_pool;
+    std::vector<int> mem_slot;        // dragon id -> slot, -1 = none
+    std::vector<int> mem_free;        // slots ready for a new dragon
+    std::vector<int> mem_live;        // dragon ids currently holding a slot
+
+    void mem_clear() {
+        for (int id : mem_live)
+            if (id >= 0 && id < (int)mem_slot.size()) mem_slot[(size_t)id] = -1;
+        mem_live.clear();
+        mem_free.clear();
+        for (int i = 0; i < (int)mem_pool.size(); i++) mem_free.push_back(i);
+    }
+
+    // The acting dragon's memory, allocated and cleared on first use.
+    DragonMemory& mem_for(int dragon_id, int w, int h) {
+        if ((int)mem_slot.size() <= dragon_id) mem_slot.resize((size_t)dragon_id + 1, -1);
+        int& slot = mem_slot[(size_t)dragon_id];
+        if (slot >= 0) return mem_pool[(size_t)slot];
+        if (mem_free.empty()) {                 // reclaim the dead before growing
+            size_t keep = 0;
+            for (size_t i = 0; i < mem_live.size(); i++) {
+                int const id = mem_live[i];
+                if (game.dragons[(size_t)id].alive) { mem_live[keep++] = id; continue; }
+                mem_free.push_back(mem_slot[(size_t)id]);
+                mem_slot[(size_t)id] = -1;
+            }
+            mem_live.resize(keep);
+        }
+        if (mem_free.empty()) {
+            mem_pool.emplace_back();
+            mem_free.push_back((int)mem_pool.size() - 1);
+        }
+        slot = mem_free.back();
+        mem_free.pop_back();
+        mem_live.push_back(dragon_id);
+        DragonMemory& dm = mem_pool[(size_t)slot];
+        dm.reset(w, h);
+        return dm;
+    }
 
     uint64_t uid_of(int dragon_id) const {
         return (episode << 12) | (uint64_t)dragon_id;
@@ -462,6 +518,7 @@ private:
         e.len_lost[0] = e.len_lost[1] = e.len_killed[0] = e.len_killed[1] = 0;
         e.headon[0] = e.headon[1] = 0;
         e.episode++;
+        e.mem_clear();          // every dragon of the new episode starts blank
         e.agents.assign(e.game.dragons.size(), AgentAcc());
         for (size_t i = 0; i < e.agents.size(); i++) {
             e.agents[i].uid = e.uid_of(e.game.dragons[i].id);
