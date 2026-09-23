@@ -19,6 +19,16 @@ class Block:
         self.msgs = [int(lines[5 + k]) for k in range(nmsgs)]
         i = 5 + nmsgs
 
+        # Protocol 3 puts ECHOES between the messages and the tiles, so it shifts
+        # every offset after it. Without this, a protocol-3 block parses the echo
+        # line as a tile and then reads everything one line out -- silently, with
+        # plausible-looking numbers.
+        self.echoes = None
+        head = lines[i].split()
+        if head and head[0] == "ECHOES":
+            self.echoes = tuple(int(v) for v in head[1:])
+            i += 1
+
         self.tiles = {}
         order = []
         for k in range(49):
