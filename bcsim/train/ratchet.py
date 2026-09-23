@@ -49,13 +49,25 @@ BCSIM = ROOT / "bcsim"
 PY = "/usr/bin/python3"                          # the torch that can drive the GPU
 ANCHOR = "anchor"
 
+# Every entry must give the 708 scalars the env now writes (bc_memory.hpp): the
+# clones are native, the older nets are zero-padded copies from
+# train/migrate_scalars.py, which play identically to their originals.
+#
+# gen4 is here because the user asked (2026-09-23) to keep it as a frozen
+# opponent across the switch to memory, and 192,000 turns of play confirm the
+# widened copy is move-for-move the same policy.
+#
+# Refreshed for the 2026-09-23 restart: v9, sss_r3 and vibing_r4 left, being
+# clones of teams that have since fallen down the ladder; devtest_2050 and v12
+# joined, and they are the two strongest models in that day's round robin after
+# sponge (which is the seed, so it is already in via --self-frac).
 DEFAULT_LEAGUE = [
-    ("submitted v10", ROOT / "runs/submitted/v10.pt"),
-    ("v9", ROOT / "runs/submitted/v9.pt"),
-    ("sss_r3", ROOT / "runs/anchors/sss_r3_bc_64x4.pt"),
-    ("sabotage", ROOT / "runs/anchors/sabotage_bc_64x4.pt"),
-    ("shink_r1", ROOT / "runs/anchors/shink_r1_bc_64x4.pt"),
-    ("vibing_r4", ROOT / "runs/anchors/vibing_r4_bc_64x4.pt"),
+    ("gen4", ROOT / "runs/anchors708/gen4.pt"),
+    ("devtest_2050", ROOT / "runs/i2/devtest_2050/best.pt"),
+    ("v12", ROOT / "runs/submitted/v12.pt"),
+    ("submitted v10", ROOT / "runs/anchors708/v10.pt"),
+    ("sabotage", ROOT / "runs/anchors708/sabotage_bc_64x4.pt"),
+    ("shink_r1", ROOT / "runs/anchors708/shink_r1_bc_64x4.pt"),
 ]
 
 

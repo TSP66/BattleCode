@@ -191,6 +191,76 @@ def extract_one(args):
     return gid, status, len(rec["round"])
 
 
+# ------------------------------------------------------- invented-map games
+# Replays only exist for official maps, so a critic fitted on them alone has
+# never seen maps-gen -- and those are 40% of training under --live-share 0.6.
+# This plays the simulator's own games there and records them in the same
+# format, so the same pretrain can use both.
+SELFPLAY_BASE = 900_000_000        # game ids well clear of any server battle id
+
+
+def selfplay(a) -> None:
+    import torch
+    import bcsim
+    from train.finetune import load_policy
+    from train.net import masked_logits
+
+    (OUT / "data").mkdir(parents=True, exist_ok=True)
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    nets = [load_policy(p_, dev)[0].eval() for p_ in a.ckpts.split(",") if p_]
+    if not nets:
+        raise SystemExit("--ckpts needs at least one policy")
+    maps_dir = pathlib.Path(a.maps)
+    names = sorted(f.stem for f in maps_dir.glob("*.map"))
+    texts = [(maps_dir / f"{n}.map").read_text() for n in names]
+    rng = np.random.default_rng(a.seed)
+    n_base = len(bcsim.SCALARS) if a.scalars == "base" else None
+
+    written = kept = 0
+    for mi, (name, text) in enumerate(zip(names, texts)):
+        env = bcsim.BattlecodeVecEnv([text], num_envs=a.envs, num_threads=a.threads,
+                                     seed=a.seed + mi, privileged=True)
+        obs = env.reset()
+        buf = [[] for _ in range(a.envs)]
+        done_here = 0
+        while done_here < a.games:
+            net = nets[rng.integers(len(nets))]
+            with torch.inference_mode():
+                lg, _ = net(torch.from_numpy(obs.local).to(dev),
+                            torch.from_numpy(obs.scalar).to(dev))
+                lg = masked_logits(lg.float(), torch.from_numpy(obs.mask).to(dev).bool())
+                # sampled, not greedy: the critic wants the spread of positions a
+                # game really visits, and greedy self-play repeats one line
+                act = torch.distributions.Categorical(logits=lg).sample()
+            keep = rng.random(len(buf)) < a.keep
+            for e in np.flatnonzero(keep):
+                buf[e].append((obs.local[e].astype(np.float16),
+                               obs.scalar[e][:n_base].copy(), obs.priv[e].copy(),
+                               int(obs.round[e]), int(obs.team[e])))
+            obs, _, st = env.step(act.to(torch.int32).cpu().numpy())
+            for row in st.as_dicts():
+                e, winner, rounds = int(row["env"]), int(row["winner"]), int(row["rounds"])
+                rec, buf[e] = buf[e], []
+                if not rec or done_here >= a.games:
+                    continue
+                gid = SELFPLAY_BASE + mi * 100_000 + done_here
+                np.savez(OUT / "data" / f"{gid}.npz",
+                         local=np.stack([r[0] for r in rec]),
+                         scalar=np.stack([r[1] for r in rec]),
+                         priv=np.stack([r[2] for r in rec]),
+                         round=np.array([r[3] for r in rec], np.int16),
+                         team=np.array([r[4] for r in rec], np.int16),
+                         outcome=np.array([1 if winner < 0 else (0 if winner == r[4] else 2)
+                                           for r in rec], np.int16),
+                         rounds=np.int16(rounds))
+                done_here += 1
+                kept += len(rec)
+        env.close()
+        written += done_here
+        print(f"  {name:<14} {done_here} games", flush=True)
+    print(f"{written} games, {kept:,} positions into {OUT / 'data'}")
+
+
 def extract(a) -> None:
     (OUT / "data").mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(0)
@@ -256,8 +326,11 @@ def pretrain(a) -> None:
     sizes = {"tr": 0, "va": 0}
     for f in files:
         sizes["va" if held_out(int(f.stem)) else "tr"] += len(np.load(f)["round"])
+    # the width the extract actually stored: bcsim's row grew to 708 when
+    # bc_memory.hpp landed, and data written before that is still the base 14
+    n_scalars = int(np.load(files[0])["scalar"].shape[1])
     shapes = {"local": ((bcsim.N_CHANNELS, 7, 7), np.float16),
-              "scalar": ((bcsim.N_SCALARS,), np.float32), "priv": ((N_PRIV,), np.float32),
+              "scalar": ((n_scalars,), np.float32), "priv": ((N_PRIV,), np.float32),
               "round": ((), np.int16), "outcome": ((), np.int16)}
     arrs = {s: {k: np.empty((n,) + sh, dt) for k, (sh, dt) in shapes.items()}
             for s, n in sizes.items()}
@@ -278,7 +351,7 @@ def pretrain(a) -> None:
     print("outcome share (train) win/draw/loss", base.round(3), flush=True)
 
     torch.manual_seed(0)
-    net = build(bcsim.N_CHANNELS, bcsim.N_SCALARS, 1, a.width, a.blocks).to(dev)
+    net = build(bcsim.N_CHANNELS, n_scalars, 1, a.width, a.blocks).to(dev)
     opt = torch.optim.AdamW(net.parameters(), lr=a.lr, weight_decay=a.wd)
     n = len(tr["round"])
     steps = a.epochs * ((n + a.batch - 1) // a.batch)
@@ -356,8 +429,18 @@ def main() -> None:
                    help="label smoothing: a result read off a position is never certain")
     t.add_argument("--gpu-frac", type=float, default=0.15,
                    help="cap on this process's share of GPU memory (other jobs run)")
+    sp = sub.add_parser("selfplay", help="games on maps replays never cover")
+    sp.add_argument("--ckpts", required=True, help="comma list of policies to play each other")
+    sp.add_argument("--maps", required=True)
+    sp.add_argument("--games", type=int, default=24, help="per map")
+    sp.add_argument("--keep", type=float, default=0.08, help="share of turns recorded")
+    sp.add_argument("--envs", type=int, default=32)
+    sp.add_argument("--threads", type=int, default=8)
+    sp.add_argument("--seed", type=int, default=0)
+    sp.add_argument("--scalars", choices=["base", "all"], default="base",
+                    help="base keeps the row the replay extracts stored, so both mix")
     a = p.parse_args()
-    extract(a) if a.cmd == "extract" else pretrain(a)
+    {"extract": extract, "pretrain": pretrain, "selfplay": selfplay}[a.cmd](a)
 
 
 if __name__ == "__main__":

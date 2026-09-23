@@ -67,3 +67,7 @@ runs/i2/*/*
 !runs/i2/full_mem_memfar/best.pt
 !runs/evals/
 runs/evals/*.pt
+
+# derived: maps/ + maps-gen/ in one directory, because build_pool takes one dir
+#   mkdir -p maps-all && cp maps/*.map maps-gen/*.map maps-all/
+maps-all/
