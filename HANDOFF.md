@@ -1,3 +1,72 @@
+# Handoff — 2026-09-23 ~11:55: memory is in the simulator; PPO ready to restart
+
+## Everything the restart needs is built and gated
+| piece | state |
+|---|---|
+| `cpp/bc_memory.hpp` + env | **done**. `tests/parity_memory.py`: 144,000 turns, 6 maps, max diff **0** vs the Python MemoryTracker |
+| `.so` rebuilt | done. `bcsim.N_SCALARS` is now **708** (14 base + 676 mem + 18 memfar) |
+| League migrated | `runs/anchors708/`: gen0-gen4, v9, v10, sss_r3, sabotage, shink_r1, vibing_r4, all "max logit diff 0" |
+| **gen4 preserved** | 192,000 turns live in the 708 env: **0 action mismatches, max logit diff 0** |
+| 60/40 weighting | `--live-maps/--live-share`, verified 0.5833 -> 0.6000 exactly |
+| Ten new maps | `maps-gen/`, gated; `train.mapgen` rebuilds them |
+| Throughput cost | rollout 235,190 -> 188,945 turns/s = **-20%** (~16% on a PPO iteration). The Python tracker would have been 22.8k, i.e. 8.3x worse |
+
+**Launch line for the next run:**
+```
+cd bcsim && setsid nohup /usr/bin/python3 -u -m train.ratchet run --run ../runs/ratchet2 \
+    --start ../runs/anchors708/gen4.pt \
+    --train-maps ../maps --live-maps ../maps-live --live-share 0.6 --gate-maps ../maps-live \
+    --segment-turns 150000000 >> ../runs/ratchet2/supervisor.out 2>&1 < /dev/null &
+```
+`--train-maps ../maps` is the 12; add `maps-gen` by copying both into one directory (build_pool
+takes a single dir). Every league path must come from `runs/anchors708/`, not the originals:
+a 14-scalar checkpoint will now fail to load, loudly, which is the intended behaviour.
+
+## Round robin, 2026-09-23 (96 games a pair, all 12 maps, se 0.029)
+```
+              devtest     sponge   ppo_gen4        v12       mean
+devtest             -      0.500      0.490      0.661      0.550
+sponge          0.500          -      0.573      0.630      0.568
+ppo_gen4        0.510      0.427          -      0.552      0.497
+v12             0.339      0.370      0.448          -      0.385
+```
+**Only one conclusion is significant**: v12, the submission live on the ladder, is clearly the
+weakest of the four (beaten 0.661 and 0.630, 3.2 and 2.5 se). sponge / devtest / ppo_gen4 are
+within ~2 se of each other -- a single pair over 96 games has se 0.051, so sponge's 0.573 over
+gen4 is only 1.4 se and is NOT a win. **The user's "restart from scratch if a distillation is
+significantly better" condition is therefore NOT met: seed from gen4.**
+
+By map bucket (live 7 / retired / never played on the server):
+```
+sponge     0.619   0.552   0.458      <- best on live, collapses on unseen (~2.3 se)
+devtest    0.536   0.531   0.597      <- improves on unseen
+ppo_gen4   0.500   0.500   0.486      <- flat: the most map-agnostic of the four
+v12        0.345   0.417   0.458
+```
+The user's "clones suck on unseen maps" holds for the strongest clone, not as a law. These are
+relative scores in a round robin, so the defensible claim is that PPO is the most map-agnostic --
+which is the argument for the wider training pool.
+
+## Clones built (recipe: 64x4, hidden 512, lr 1e-3, chunk-games 270, features mem,memfar)
+- `runs/i2/devtest_2050/best.pt` val_acc **0.8788** (PR's mm was 0.8520). Cache 2050:1 + 1302:0.5.
+- `runs/i2/sponge_2110/best.pt` val_acc 0.8169.
+- **Use 4 epochs, not 5 or 6.** Three runs now (mm's 6th, devtest's 5th, sponge's 5th) where the
+  last epoch gained nothing and val_nll turned. Both clones' best.pt came from epoch 3.
+- **Imitation accuracy does not predict strength**: sponge is 6 points worse at copying and plays
+  at least as well. Rank clones by play, never by val_acc.
+- `val_acc_novel` is a composition artefact, not generalisation: repeats concentrate in openings
+  (96% of rounds 0-10) which are the EASIEST rows, and the effect reverses late (round 350+:
+  repeats 0.8345 vs novel 0.8836). Don't headline it.
+
+## Not done / open
+- **v12 is live and is the weakest model we have.** Replacing it is worth considering separately
+  from the restart. Nothing clears the >0.60-against-everything bar, so it is a judgement call.
+- cheji bt: 1,402 games scraped and ready; never cloned (the user cut it for time). Ladder
+  position does not predict clone strength, so it is worth measuring rather than assuming.
+- `wormhole` is the weakest of the new maps (42-round games); watch it in training.
+- `imitate2.py:218` throws a benign `.item()` UserWarning; one `.detach()` fixes it.
+
+---
 # Handoff — 2026-09-23 ~10:05: ratchet PAUSED, cloning the top 3, round robin queued
 
 ## The ratchet is paused, not finished
