@@ -115,8 +115,19 @@ Data: 19,247 games across 17 team folders. Cap with `--max-games` (the full set 
   measured. The echo path is fine.
 - The critic is built and its path verified end to end, but **not pretrained**.
 - No PPO run has been started (the user asked for none).
-- Deployment for the pyramid: `export_cpp.py`, `mybot/net.hpp`, `obs.hpp`,
-  `memory.hpp` all still assume the flat architecture.
+- **Deployment for the pyramid is a substantial job, not a tweak.**
+  `export_cpp.py` has no architecture dispatch at all: it walks
+  `blocks.{i}.c1.weight` and reads `cfg["width"]` / `cfg["blocks"]` directly, so
+  it only knows ActorCritic. Shipping a pyramid needs (a) a tensor order for the
+  two branches, the pooled wide head and the wider fuse, (b) a second conv trunk
+  in `mybot/net.hpp` over 12x15x15 with the AvgPool, (c) `mybot/memory.hpp` to
+  emit the `wide` planes rather than the flat 708 features, and (d) new
+  `wasmprobe/parity_net.py` and `parity_mem.py` checks. Until that exists nothing
+  on the new architecture can be submitted, whatever the round robin says.
+- Adopting `PROTOCOL 3` in mybot changes the block it parses (ECHOES is inserted
+  before the tiles), so `mybot/obs.hpp` needs it and `check_bot.sh` must pass
+  before any submission. The broadcast itself is cheap: **0.51M points a turn**,
+  metered.
 - Real BPTT for the ConvLSTM.
 
 ---
