@@ -107,6 +107,7 @@ def distill_recurrent(a, teacher, ck, dev, out, log) -> None:
     # a slot per live dragon; the unit limit caps how many there can be
     pool = StatePool(n, 96, a.hid_ch, bcsim.WIDE_SIDE, device=dev)
     envs_idx = np.arange(n)
+    prev_round = np.asarray(obs.round, np.int64).copy()
     t_start = time.perf_counter()
 
     for it in range(a.iters):
@@ -143,6 +144,13 @@ def distill_recurrent(a, teacher, ck, dev, out, log) -> None:
                 done = closures.done.astype(bool)
                 if done.any():
                     pool.release(closures.env[done].astype(np.int64), closures.uid[done])
+            # A finished game restarts its env, and every dragon in it is gone;
+            # closures alone leak slots (see StatePool.release_envs).
+            cur = np.asarray(obs.round, np.int64)
+            restarted = np.flatnonzero(cur < prev_round)
+            if len(restarted):
+                pool.release_envs(restarted)
+            prev_round = cur.copy()
 
         torch.nn.utils.clip_grad_norm_(params, 1.0)
         opt.step()

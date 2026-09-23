@@ -258,6 +258,23 @@ class StatePool:
         for s in have[ok]:
             self.release_slot(int(s))
 
+    def release_envs(self, envs: np.ndarray) -> None:
+        """Free every slot belonging to these envs, whatever became of its dragon.
+
+        Closures alone do not empty the pool. A dragon whose id is never handed
+        out again leaves its slot held forever, and splits keep inventing new ids
+        inside an episode, so the occupancy climbs -- measured, 1,664 slots in
+        use at the start and 18,325 by iteration 982, heading for the 24,576
+        there are. Exhaustion is not a crash but something worse: a live dragon
+        silently loses its memory, which is exactly the thing being measured. So
+        a finished episode releases its whole env.
+        """
+        if len(envs) == 0:
+            return
+        doomed = np.flatnonzero(np.isin(self.owner_env, np.asarray(envs)))
+        for s in doomed:
+            self.release_slot(int(s))
+
     def carry(self, slots: np.ndarray, x: np.ndarray, y: np.ndarray,
               face: np.ndarray, w: np.ndarray, hgt: np.ndarray):
         """Roll each row's state to its new frame and return it, gathered.
