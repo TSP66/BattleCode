@@ -16,6 +16,7 @@ CKPT="$(cd "$(dirname "${1:?usage: submit.sh ckpt.pt \"description\"}")" && pwd)
 DESC="${2:?give a short description of what changed}"
 PY="$ROOT/.venv-train/bin/python"
 SUB="$ROOT/runs/submitted"
+export PATH="$HOME/.local/bin:$PATH"      # where uv puts the unswbc CLI
 mkdir -p "$SUB"
 
 echo "== export"
@@ -25,10 +26,12 @@ echo "== checks"
 "$ROOT/wasmprobe/check_bot.sh" "$CKPT"
 
 echo "== upload"
-NAME="$(basename "$(dirname "$(dirname "$CKPT")")")-$(basename "$CKPT" .pt)"
+# the run's own directory names the version, not the directory above it:
+# runs/i2/ft_control/best.pt is "ft_control-best", not "i2-best"
+NAME="$(basename "$(dirname "$CKPT")")-$(basename "$CKPT" .pt)"
 OUT="$(unswbc submit "$ROOT/mybot" -n "$NAME" -d "$DESC" 2>&1)"
 echo "$OUT"
-VERSION="$(echo "$OUT" | sed -n 's/.* as \(v[0-9]\+\).*/\1/p')"
+VERSION="$(echo "$OUT" | sed -n 's/.* as \(v[0-9][0-9]*\).*/\1/p')"
 if [ -z "$VERSION" ]; then
     echo "could not read the version number from the upload; NOT recorded" >&2
     exit 1

@@ -48,7 +48,7 @@ inline float fast_exp(float x) {
 inline float silu(float x) { return x / (1.0f + fast_exp(-x)); }
 
 struct Weights {
-    int width = 0, blocks = 0, hidden = 0, head = 0;
+    int width = 0, blocks = 0, hidden = 0, head = 0, scalars = 0;
     std::vector<float> data;
     std::size_t at = 0;
 
@@ -60,14 +60,16 @@ struct Weights {
 };
 
 // Shape of the trained network, which fixes how many parameters it has. The
-// layer sizes not in the header (23 input channels, 14 scalars, 128 in the
-// scalar branch, 48 actions) are the observation's and the codec's.
-inline std::size_t expected_count(int width, int blocks, int hidden, int head) {
+// layer sizes not in the header (23 input channels, 128 in the scalar branch,
+// 48 actions) are the observation's and the codec's. The scalar count is in
+// the header because it depends on the extra inputs the checkpoint was
+// trained with: 14 for the plain observation, 708 with the remembered map.
+inline std::size_t expected_count(int width, int blocks, int hidden, int head, int scalars) {
     std::size_t const w = (std::size_t)width, hd = (std::size_t)head, hi = (std::size_t)hidden;
     std::size_t n = w * 23 * 9 + 2 * w;                         // stem
     n += (std::size_t)blocks * 2 * (w * w * 9 + 2 * w);          // residual blocks
     n += hd * w + 2 * hd;                                         // 1x1 projection
-    n += 14 * 128 + 128 + 128 * 128 + 128;                        // scalar branch
+    n += (std::size_t)scalars * 128 + 128 + 128 * 128 + 128;      // scalar branch
     n += (hd * CELLS + 128) * hi + hi + hi * hi + hi;             // fused layers
     n += hi * 48 + 48;                                            // policy head
     return n;
@@ -83,13 +85,20 @@ inline std::uint32_t fnv1a(std::uint32_t h, std::uint32_t v) { return (h ^ v) * 
 // join two bytes, hash, widen -- the same work a file load used to do.
 inline bool load_embedded(char const* hi, char const* lo, std::uint32_t count,
                           std::uint32_t checksum, int width, int blocks, int hidden,
-                          int head, Weights& w, char const** why) {
+                          int head, int scalars, int scalars_max, Weights& w,
+                          char const** why) {
     *why = "ok";
     if (width <= 0 || width % 8 != 0 || blocks < 0 || hidden <= 0 || head <= 0 || head % 8 != 0) {
         *why = "bad shape";
         return false;
     }
-    if (expected_count(width, blocks, hidden, head) != count) {
+    // the bot can feed a net that wants only the observation's scalars, or one
+    // that also wants every remembered input it computes -- nothing else
+    if (scalars <= 0 || scalars > scalars_max) {
+        *why = "scalar count is not one this bot can feed";
+        return false;
+    }
+    if (expected_count(width, blocks, hidden, head, scalars) != count) {
         *why = "count does not match shape";
         return false;
     }
@@ -112,6 +121,7 @@ inline bool load_embedded(char const* hi, char const* lo, std::uint32_t count,
     w.blocks = blocks;
     w.hidden = hidden;
     w.head = head;
+    w.scalars = scalars;
     w.at = 0;
     return true;
 }

@@ -44,6 +44,29 @@ failure invisible. **Run `wasmprobe/check_bot.sh <ckpt>` before every upload.**
 - **How often:** 1 turn in 1,049 (`help`).
 - **Fix:** comes with issue 1.
 
+## Fixed: every dragon's first turn traded itself away
+
+- **Where:** `mybot/main.cpp`, `fallback()`.
+- **What:** the turn that widens the weights cannot also afford a forward pass,
+  so every dragon's first turn is played by a heuristic. It stepped straight on
+  without looking at what was there, and entering a head's cell is legal and
+  kills both dragons. A split child's first turn is exactly when a friendly head
+  is one step away.
+- **How bad:** on Default all four dragons split on round 1 and each child's
+  blind step killed an ally: **six of our eight dragons gone before round 2**,
+  in every game, on both sides of a mirror match, which is why local evaluation
+  never saw it (`bcsim` has no first-turn fallback -- every turn there runs the
+  network, so the round robin cannot see this class of bug at all). On the server
+  it lost a game 0-12 in two rounds to an opponent that did not reciprocate
+  (battle 58343, submission v11).
+- **Fix:** the heuristic now refuses any step onto a cell holding a head, of
+  either team, and prefers straight on among what is left. Round 0-3 deaths on
+  Default: 12 -> 0. Against the identical weights with the old heuristic it
+  scores **0.875 over 16 games** (both sides of the 8 live maps). On the server,
+  the same opponent and map that beat v11 0-12 in two rounds loses to v12
+  **109-0** over a full game (battles 58343 and 58665).
+- **Present in v10 and every submission before it.**
+
 ## 3. `archive/dbgbot/obs.py` marks a pearl on every cell
 
 - **What:** its pearl channel is 1 everywhere, even when the protocol says
@@ -64,7 +87,8 @@ side (team A/B) bias in the eval setup or the maps.
 
 - `wasmprobe/check_bot.sh <ckpt>`: the pre-upload gate. It checks zip size, a
   no-filesystem wasm run under the judge's metering, observation parity with
-  the simulator, forward parity with the checkpoint, and a full real-engine
-  game.
+  the simulator, parity of the remembered inputs (`mem`, `memfar`) with
+  `clone_features.MemoryTracker`, forward parity with the checkpoint, and a
+  full real-engine game.
 - `bcsim/tests/test_vecenv.py [maps_dir]`: simulator vs engine, turn by turn;
   also run on the augmented maps.

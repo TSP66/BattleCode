@@ -19,6 +19,7 @@ simulator and shipped as a C++ bot with the weights compiled in.
 | `runs/replays/` | Scraped games of the top teams (datasets are rebuilt, see `DISTILL.md`) |
 
 **Distillation on another machine: see `DISTILL.md`.** Current RL state: `HANDOFF.md`.
+Cloning dev test with remembered features and labelled tactics: `DISTILL_DEVTEST.md`.
 
 ## Setup (new machine)
 

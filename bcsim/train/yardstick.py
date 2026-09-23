@@ -109,9 +109,18 @@ def greedy(net, dev, max_batch: int = 0):
     return act
 
 
+def _call(fn, obs, rows):
+    """An act callable on the chosen rows. A stateful one (a policy with
+    memory, see clone_eval.py) gets the whole observation and the row mask,
+    since it has to know which dragon of which game each row is."""
+    if getattr(fn, "stateful", False):
+        return fn.rows(obs, rows)
+    return fn(obs.local[rows], obs.scalar[rows], obs.mask[rows])
+
+
 def evaluate(learner, opponents: list[dict], maps: list[str], map_names: list[str],
              games: int = 16, threads: int = 8, seed: int = 12345,
-             max_seconds: float = 900.0) -> dict:
+             max_seconds: float = 900.0, progress: float = 0.0) -> dict:
     """Plays `games` per (opponent, map) cell, half on each side.
 
     opponents: {"name", "bot": index} for a scripted bot, or {"name", "act":
@@ -136,13 +145,20 @@ def evaluate(learner, opponents: list[dict], maps: list[str], map_names: list[st
     net_opps = [o for o, spec in enumerate(opponents) if spec.get("act") is not None]
     is_bot = np.array([opponents[o].get("bot") is not None for o in opp_of])
 
+    stateful = [f for f in [learner] + [o.get("act") for o in opponents]
+                if getattr(f, "stateful", False)]
     done = np.zeros(n, np.int64)
     results: list[list] = [[] for _ in range(n)]
     turns = np.zeros(n, np.int64)          # learner turns, for portal usage
     portal = np.zeros(n, np.float64)
     obs = env.reset()
     t0 = time.perf_counter()
+    last_report = t0
     while (done < per_side).any():
+        if progress and time.perf_counter() - last_report > progress:
+            last_report = time.perf_counter()
+            print(f"  {int((done >= per_side).sum())}/{n} games done, "
+                  f"{last_report - t0:.0f}s", flush=True)
         if time.perf_counter() - t0 > max_seconds:
             print(f"  eval hit its {max_seconds:.0f}s limit, "
                   f"{int((done < per_side).sum())} envs short", flush=True)
@@ -150,11 +166,11 @@ def evaluate(learner, opponents: list[dict], maps: list[str], map_names: list[st
         mine = obs.team == learner_team
         acts = np.zeros(n, np.int32)
         if mine.any():
-            acts[mine] = learner(obs.local[mine], obs.scalar[mine], obs.mask[mine])
+            acts[mine] = _call(learner, obs, mine)
         for o in net_opps:
             rows = (~mine) & (opp_of == o)
             if rows.any():
-                acts[rows] = opponents[o]["act"](obs.local[rows], obs.scalar[rows], obs.mask[rows])
+                acts[rows] = _call(opponents[o]["act"], obs, rows)
         # portal usage is only counted against bots: there every closure is the
         # learner's, whereas against a network both sides' turns close
         turns += mine & (done < per_side) & is_bot
@@ -164,6 +180,8 @@ def evaluate(learner, opponents: list[dict], maps: list[str], map_names: list[st
             np.add.at(portal, closures.env[keep], closures.comps[keep, PORTAL])
         for row in eps.rows:
             e = int(row[0])
+            for fn in stateful:
+                fn.forget(e)            # the env has already started its next game
             if done[e] >= per_side:
                 continue
             done[e] += 1

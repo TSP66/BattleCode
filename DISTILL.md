@@ -119,6 +119,22 @@ alternative when the teacher is another team's replays rather than a network.
 `--games 12` means 96 games per opponent. **Use at least 84–96 games for any
 decision.** Identical nets have scored 0.29–0.75 over 32 games.
 
+**`train/clone_eval.py` and `train/round_robin.py`** are the same evaluation for
+clones that carry extra inputs (see below), and run on CUDA, MPS or CPU. A round
+robin resumes and its passes can run as parallel processes.
+
+## 4b. Cloning with remembered features, and labelled tactics
+
+`DISTILL_DEVTEST.md` is the write-up of the dev test r3 work: memory features
+(+2.9 points of held-out accuracy over the same pipeline, +4.3 over r3 on games
+r3 never saw, and r3 last in a 6-way round robin), super-sprint and self-trap
+labelling from replays, and loss weighting. `train/clone_cache.py`,
+`clone_features.py`, `imitate2.py`, `super_sprint.py`, `self_trap.py`,
+`tossup.py`. Note the two accuracy traps it found: 33% of held-out rows are
+exact repeats of training rows (deterministic teams replay whole games), and an
+older clone's split was drawn over a smaller game list, which inflated v10 from
+82.5% to 85.0% on today's split.
+
 ## 5. Teachers and how strong they are
 
 The 96-game head-to-heads were on the 8 live maps, greedy play

@@ -1,0 +1,17 @@
+  121/288 games done, 300s
+  160/288 games done, 600s
+  172/288 games done, 900s
+  216/288 games done, 1200s
+  217/288 games done, 1500s
+  223/288 games done, 1800s
+  249/288 games done, 2100s
+  252/288 games done, 2400s
+  252/288 games done, 2700s
+  258/288 games done, 3000s
+ft_sprint_good vs ['ft_control', 'mm', 'v10']: ft_control 0.474  mm 0.562  v10 0.526  (3076s)
+                 ft_sprint_ ft_control         mm        v10       mean     se
+ft_sprint_good            -      0.474      0.562      0.526      0.521  0.029
+ft_control            0.526          -          .          .      0.526  0.051
+mm                    0.438          .          -          .      0.438  0.051
+v10                   0.474          .          .          -      0.474  0.051
+games per pair: [96]

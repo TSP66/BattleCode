@@ -28,12 +28,15 @@ TOL = 0.02          # bf16 weights, fast_exp and summation order all differ a ha
 
 def main() -> None:
     ck = torch.load(sys.argv[1], map_location="cpu", weights_only=False)
-    net = ActorCritic(C, S, A, width=ck["args"]["width"], blocks=ck["args"]["blocks"])
     state = {}
     for k, v in ck["net"].items():
         u = v.float().contiguous().view(torch.int32)
         state[k.replace("_orig_mod.", "")] = (((u + 0x7FFF + ((u >> 16) & 1)) >> 16) << 16) \
             .view(torch.float32)
+    # a clone trained with remembered features wants more scalars than the
+    # observation has; the bot appends them in the order the checkpoint names
+    n_sc = int(state["scalar.0.weight"].shape[1])
+    net = ActorCritic(C, n_sc, A, width=ck["args"]["width"], blocks=ck["args"]["blocks"])
     net.load_state_dict(state)
     net.eval()
 
@@ -45,10 +48,15 @@ def main() -> None:
     if not ran:
         print("no turn ran the network")
         sys.exit(1)
+    n_dump = len(ran[0]) - (2 + C * 49 + 2 * A)      # every scalar the bot fed
+    if n_dump < n_sc:
+        print(f"the bot dumped {n_dump} scalars, the checkpoint wants {n_sc}")
+        sys.exit(1)
     loc = np.stack([r[2:2 + C * 49] for r in ran]).reshape(-1, C, 7, 7)
-    sc = np.stack([r[2 + C * 49:2 + C * 49 + S] for r in ran])
-    mask = np.stack([r[2 + C * 49 + S:2 + C * 49 + S + A] for r in ran]) > 0
-    lg = np.stack([r[2 + C * 49 + S + A:2 + C * 49 + S + 2 * A] for r in ran])
+    sc = np.stack([r[2 + C * 49:2 + C * 49 + n_sc] for r in ran])
+    base = 2 + C * 49 + n_dump
+    mask = np.stack([r[base:base + A] for r in ran]) > 0
+    lg = np.stack([r[base + A:base + 2 * A] for r in ran])
     act = np.array([int(r[1]) for r in ran])
     with torch.no_grad():
         tl, _ = net(torch.tensor(loc, dtype=torch.float32), torch.tensor(sc, dtype=torch.float32))

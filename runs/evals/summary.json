@@ -1,0 +1,356 @@
+{
+ "training": {
+  "base_300": {
+   "epochs": 3,
+   "best": {
+    "epoch": 2,
+    "train_acc": 0.8084,
+    "val_nll": 0.4908,
+    "val_acc": 0.7812
+   }
+  },
+  "big128x6_300": {
+   "epochs": 1,
+   "best": {
+    "epoch": 0,
+    "train_acc": 0.714,
+    "val_nll": 0.5557,
+    "val_acc": 0.7511,
+    "val_acc_novel": 0.7384
+   }
+  },
+  "ft_aggr": {
+   "epochs": 2,
+   "best": {
+    "epoch": 1,
+    "train_acc": 0.8823,
+    "val_nll": 0.3532,
+    "val_acc": 0.8509,
+    "val_acc_novel": 0.8201
+   }
+  },
+  "ft_control": {
+   "epochs": 2,
+   "best": {
+    "epoch": 1,
+    "train_acc": 0.8874,
+    "val_nll": 0.3462,
+    "val_acc": 0.8539,
+    "val_acc_novel": 0.8212
+   }
+  },
+  "ft_sprint": {
+   "epochs": 2,
+   "best": {
+    "epoch": 1,
+    "train_acc": 0.8829,
+    "val_nll": 0.3531,
+    "val_acc": 0.8511,
+    "val_acc_novel": 0.8202
+   }
+  },
+  "ft_tossup": {
+   "epochs": 2,
+   "best": {
+    "epoch": 1,
+    "train_acc": 0.8869,
+    "val_nll": 0.3462,
+    "val_acc": 0.8535,
+    "val_acc_novel": 0.8209
+   }
+  },
+  "full_base": {
+   "epochs": 6,
+   "best": {
+    "epoch": 4,
+    "train_acc": 0.8504,
+    "val_nll": 0.4056,
+    "val_acc": 0.823,
+    "val_acc_novel": 0.7944
+   }
+  },
+  "full_mem_memfar": {
+   "epochs": 6,
+   "best": {
+    "epoch": 4,
+    "train_acc": 0.8758,
+    "val_nll": 0.3457,
+    "val_acc": 0.8518,
+    "val_acc_novel": 0.8225
+   }
+  },
+  "hist3_300": {
+   "epochs": 3,
+   "best": {
+    "epoch": 2,
+    "train_acc": 0.815,
+    "val_nll": 0.472,
+    "val_acc": 0.7906
+   }
+  },
+  "hist8_300": {
+   "epochs": 3,
+   "best": {
+    "epoch": 2,
+    "train_acc": 0.8165,
+    "val_nll": 0.4666,
+    "val_acc": 0.7925,
+    "val_acc_novel": 0.7734
+   }
+  },
+  "hist8_mem_300": {
+   "epochs": 3,
+   "best": {
+    "epoch": 2,
+    "train_acc": 0.8307,
+    "val_nll": 0.4437,
+    "val_acc": 0.8038,
+    "val_acc_novel": 0.7832
+   }
+  },
+  "mem_300": {
+   "epochs": 3,
+   "best": {
+    "epoch": 2,
+    "train_acc": 0.8308,
+    "val_nll": 0.4444,
+    "val_acc": 0.8039,
+    "val_acc_novel": 0.7827
+   }
+  },
+  "mem_memfar_300": {
+   "epochs": 3,
+   "best": {
+    "epoch": 2,
+    "train_acc": 0.8325,
+    "val_nll": 0.4409,
+    "val_acc": 0.8061,
+    "val_acc_novel": 0.785
+   }
+  },
+  "moves_300": {
+   "epochs": 3,
+   "best": {
+    "epoch": 2,
+    "train_acc": 0.8019,
+    "val_nll": 0.494,
+    "val_acc": 0.7796,
+    "val_acc_novel": 0.7619
+   }
+  },
+  "moves_hist3_300": {
+   "epochs": 0,
+   "best": {}
+  }
+ },
+ "round_robin": {
+  "names": [
+   "full_base",
+   "ft_aggr",
+   "ft_tossup",
+   "ft_sprint",
+   "ft_control",
+   "mm",
+   "v10"
+  ],
+  "matrix": [
+   [
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
+   ],
+   [
+    null,
+    null,
+    0.4913,
+    0.4943,
+    0.46,
+    0.4425,
+    0.5141
+   ],
+   [
+    null,
+    0.5087,
+    null,
+    0.5182,
+    0.5157,
+    0.4896,
+    0.5859
+   ],
+   [
+    null,
+    0.5057,
+    0.4818,
+    null,
+    0.4375,
+    0.4609,
+    0.5364
+   ],
+   [
+    null,
+    0.54,
+    0.4843,
+    0.5625,
+    null,
+    0.5157,
+    0.5573
+   ],
+   [
+    null,
+    0.5575,
+    0.5104,
+    0.5391,
+    0.4844,
+    null,
+    0.5052
+   ],
+   [
+    null,
+    0.4859,
+    0.4141,
+    0.4636,
+    0.4427,
+    0.4948,
+    null
+   ]
+  ],
+  "games": [
+   [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    0,
+    0,
+    173,
+    175,
+    175,
+    174,
+    177
+   ],
+   [
+    0,
+    173,
+    0,
+    192,
+    192,
+    192,
+    192
+   ],
+   [
+    0,
+    175,
+    192,
+    0,
+    192,
+    192,
+    192
+   ],
+   [
+    0,
+    175,
+    192,
+    192,
+    0,
+    192,
+    192
+   ],
+   [
+    0,
+    174,
+    192,
+    192,
+    192,
+    0,
+    192
+   ],
+   [
+    0,
+    177,
+    192,
+    192,
+    192,
+    192,
+    0
+   ]
+  ],
+  "mean": {
+   "full_base": null,
+   "ft_aggr": 0.4805,
+   "ft_tossup": 0.5239,
+   "ft_sprint": 0.4841,
+   "ft_control": 0.5318,
+   "mm": 0.5186,
+   "v10": 0.4598
+  },
+  "se": {
+   "full_base": null,
+   "ft_aggr": 0.0169,
+   "ft_tossup": 0.0163,
+   "ft_sprint": 0.0163,
+   "ft_control": 0.0163,
+   "mm": 0.0163,
+   "v10": 0.0163
+  }
+ },
+ "anchors": {
+  "ft_aggr": {
+   "sss_r3_bc_64x4": 0.3974,
+   "vibing_r4_bc_64x4": 0.6453,
+   "shink_r1_bc_64x4": 0.6059,
+   "sabotage_bc_64x4": 0.539,
+   "turns_112721920": 0.473,
+   "mean": 0.5321
+  },
+  "ft_sprint": {
+   "sss_r3_bc_64x4": 0.42,
+   "vibing_r4_bc_64x4": 0.6845,
+   "shink_r1_bc_64x4": 0.4885,
+   "sabotage_bc_64x4": 0.5461,
+   "turns_112721920": 0.4211,
+   "mean": 0.512
+  },
+  "mm": {
+   "sss_r3_bc_64x4": 0.6458,
+   "vibing_r4_bc_64x4": 0.8229,
+   "shink_r1_bc_64x4": 0.625,
+   "sabotage_bc_64x4": 0.5625,
+   "turns_112721920": 0.5833,
+   "mean": 0.6479
+  },
+  "v10": {
+   "sss_r3_bc_64x4": 0.6042,
+   "vibing_r4_bc_64x4": 0.7188,
+   "shink_r1_bc_64x4": 0.599,
+   "sabotage_bc_64x4": 0.5729,
+   "turns_112721920": 0.5521,
+   "mean": 0.6094
+  }
+ },
+ "labels": {
+  "sprint": {
+   "samples": 10827303,
+   "probed": 10771953,
+   "last": 1984,
+   "longest": 8767,
+   "teacher_last": 674,
+   "teacher_longest": 4219,
+   "survive": 55
+  },
+  "selftrap": {
+   "samples": 10827303,
+   "trapped_moves": 209660,
+   "self_traps": 8949,
+   "sacrifices": 16029
+  }
+ }
+}
