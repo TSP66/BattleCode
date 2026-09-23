@@ -1,3 +1,59 @@
+# Handoff — 2026-09-23 ~10:20: PR #1 merged (first-turn fix + remembered-map inputs)
+
+`origin/distill-devtest-features` is merged into local `main` (merge commit, nothing pushed).
+Full review notes are in the merge commit message. The headline: **`mybot`'s `fallback()` played
+every dragon's first turn and stepped straight on blind. Entering a head's cell is legal and kills
+both dragons, so six of eight dragons died before round 2 in every game, in v10 and everything
+before it.** Confirmed independently against the API: battle 58343 (v11, sub 2498) lost 0-12 on
+map 4; battle 58665 (v12, sub 2520, the same opponent submission 1371 on the same map) won 109-0.
+Sub 2520 is active on the server.
+
+Checked against the rules rather than taken on trust: `fill_mask` (cpp/bc_obs.hpp) already excludes
+own body and another dragon's body as certain death, and deliberately allows a head-on because it is
+a mutual kill. A head is the only legal-but-suicidal step, so refusing heads is the complete fix.
+
+## TWO REBUILD STEPS ARE PENDING (both deliberately not done, the ratchet is running)
+1. **`make -C bcsim`** — `cpp/bc_vec.hpp` and `cpp/bc_capi_vec.cpp` gained `probe()` and
+   `last_deaths()`, and `bcsim/env.py` binds them. The `.so` files were NOT rebuilt, so the live
+   ratchet is untouched, but `env.probe()` / `env.last_deaths()` (used by `clone_eval.py` and
+   `self_trap.py`) will fail until the rebuild. **Do it once the run is over, not before:** a new
+   segment or gate dlopens the `.so`.
+2. **Re-export `mybot/weights_data.hpp`** — it is generated and gitignored, and the copy on disk
+   predates the merge, so it has no `SCALARS` and `mybot` will not compile until:
+   `cd bcsim && python -m train.export_cpp --ckpt <ckpt> --header ../mybot/weights_data.hpp`.
+   Verified both ways: with the stale header the build fails on `embedded::SCALARS`; re-exported
+   from `runs/submitted/v10.pt` (a plain 14-scalar checkpoint) it compiles with and without
+   `-DBC_DUMP`, which is the PR's backward-compatibility claim holding.
+
+## Verified safe for the live run before merging
+- `bcsim/env.py` only adds two methods, each binding its ctypes symbols lazily, so the stale `.so`
+  still imports (checked with the privileged build the ratchet uses).
+- `bcsim/train/yardstick.py` is imported by the gate. The changes are inert for non-stateful
+  policies (`getattr(fn, "stateful", False)` is False, `progress=0.0` silences the new print);
+  `evaluate()` was run end-to-end on the merged code against the current `.so` and returned a
+  well-formed summary.
+- `runs/ft3/maps`, `runs/ratchet` and the league's `v9`/`v10` paths are untouched.
+
+## One correction made on top of the PR
+`wasmprobe/submit.sh`'s new naming (`basename $(dirname $CKPT)`) fixed `runs/i2/ft_control/best.pt`
+-> `ft_control-best` but broke the RL layout: `runs/ratchet/anchors/gen5.pt` would have uploaded as
+`anchors-gen5` and `runs/ft6/snapshots/...` as `snapshots-...`. Bucket directory names
+(snapshots, anchors, cands, ckpt, checkpoints) now fall through to the run above.
+
+## Research merged, in one line each (DISTILL_DEVTEST.md has the numbers)
+- Remembered-map inputs (`mem` 676 + `memfar` 18) are the real win: +2.9 points of held-out
+  accuracy over the same pipeline, +4.3 over r3 on games r3 never saw, and r3 comes last in a
+  6-way round robin. Best clone `mm` scores 0.607 against the anchor field.
+- Super-sprint relabelling at weight 10 **loses** (0.484/0.481 vs 0.532 control): 99% of
+  super-sprints are head-on, so it taught head-trading -- 14x more draws, games 25 rounds shorter.
+  Retried with good trades only at weight 3, back to level and it still plays them.
+- Self-traps counted (8,949, 0.083% of turns), not used; 64% of candidates were sacrifices.
+- Toss-up downweighting: neutral (0.524 vs 0.532).
+- Two accuracy traps found: 33% of held-out rows are exact repeats of training rows (deterministic
+  teams replay whole games), and an older split inflated v10's reported accuracy 82.5% -> 85.0%.
+- Nothing here clears the >0.60-against-everything bar, so no upload is recommended from it.
+
+---
 # Handoff — 2026-09-23 ~09:40: rotation changed, and `maps/` is now the full local pool
 
 ## The server swapped maps on 2026-09-22 12:54

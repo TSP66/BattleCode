@@ -27,8 +27,16 @@ echo "== checks"
 
 echo "== upload"
 # the run's own directory names the version, not the directory above it:
-# runs/i2/ft_control/best.pt is "ft_control-best", not "i2-best"
-NAME="$(basename "$(dirname "$CKPT")")-$(basename "$CKPT" .pt)"
+# runs/i2/ft_control/best.pt is "ft_control-best", not "i2-best". When that
+# directory is only a bucket, the run above it is the name, so the RL side
+# keeps its old names: runs/ratchet/anchors/gen5.pt is "ratchet-gen5", not
+# "anchors-gen5", and runs/ft6/snapshots/turns_112721920.pt is "ft6-turns...".
+DIR="$(basename "$(dirname "$CKPT")")"
+case "$DIR" in
+    snapshots|anchors|cands|ckpt|checkpoints)
+        DIR="$(basename "$(dirname "$(dirname "$CKPT")")")" ;;
+esac
+NAME="$DIR-$(basename "$CKPT" .pt)"
 OUT="$(unswbc submit "$ROOT/mybot" -n "$NAME" -d "$DESC" 2>&1)"
 echo "$OUT"
 VERSION="$(echo "$OUT" | sed -n 's/.* as \(v[0-9][0-9]*\).*/\1/p')"
