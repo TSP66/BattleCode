@@ -168,6 +168,11 @@ Hypotheses tested and **rejected**, recorded so they are not tried again:
   (823/791/1182/1242 on default_small);
 - a dragon on the far side of a kelp edge still being heard -- worse
   (293/121/309/466);
+- kelp as a fallback rather than a terminator, the ray walking through it and
+  reporting kelp only if it never finds a dragon -- much worse
+  (1205/1457/1215/1458), and it also cannot be right because the engine reports
+  kelp on 1106 of 1611 single-ray turns, which a ray that never stops at kelp
+  would not do;
 - a ray hitting the sender's own head after wrapping while passing through its
   body -- no change;
 - casting from the pre-move rather than the post-move position -- worse;
