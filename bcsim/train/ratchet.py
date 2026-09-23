@@ -98,8 +98,8 @@ def gate(a) -> None:
     for name, path in specs:
         onet, _ = load_net(path, dev)
         nets.append(onet)
-        opps.append({"name": name, "act": greedy(onet, dev, n_envs), "path": path})
-    res = evaluate(greedy(net, dev, n_envs), opps, maps, map_names, games=a.games,
+        opps.append({"name": name, "act": greedy(onet, dev), "path": path})
+    res = evaluate(greedy(net, dev), opps, maps, map_names, games=a.games,
                    threads=a.threads, seed=a.seed, max_seconds=a.max_seconds)
 
     # merge the anchor repeats into one opponent

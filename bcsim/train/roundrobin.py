@@ -26,7 +26,6 @@ raise it for the pairs that matter.
 from __future__ import annotations
 
 import argparse
-import itertools
 import json
 import pathlib
 import sys
@@ -56,8 +55,6 @@ def parse() -> argparse.Namespace:
     p.add_argument("--threads", type=int, default=8)
     p.add_argument("--seed", type=int, default=12345)
     p.add_argument("--max-seconds", type=float, default=3600.0, help="per row")
-    p.add_argument("--no-graph", action="store_true",
-                   help="skip CUDA graph capture (slower; for debugging)")
     p.add_argument("--out", default="", help="write the full result as json here")
     return p.parse_args()
 
@@ -140,12 +137,11 @@ def main() -> None:
     print(f"{n_ag} agents, {len(maps)} maps, {a.games} games per cell per side, "
           f"{n_envs} envs per row", flush=True)
 
-    # Capture each net's graph once and reuse the callable for every row: a
-    # capture per row would be n_ag times the graphs and the memory.
+    # One callable per net, reused for every row of the matrix.
     acts, archs = {}, {}
     for name, path in agents:
         net, ck = load_net(path, dev)
-        acts[name] = greedy(net, dev, 0 if a.no_graph else n_envs)
+        acts[name] = greedy(net, dev)
         archs[name] = ck["args"].get("arch", "flat")
         print(f"  {name:28s} {archs[name]:8s} "
               f"{sum(q.numel() for q in net.parameters()):,} params", flush=True)

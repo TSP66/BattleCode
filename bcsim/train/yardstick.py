@@ -76,67 +76,34 @@ def load_net(path: str | pathlib.Path, dev: torch.device) -> tuple[ActorCritic, 
 def greedy(net, dev, max_batch: int = 0):
     """Argmax policy as a callable on numpy rows.
 
-    With max_batch set, the forward pass is captured once as a CUDA graph over
-    a fixed batch and replayed with the rows padded to it. Evaluation steps are
-    tiny and strictly sequential (one dragon turn each, ~30k per game between
-    two swarms), so kernel launch latency, worse still on a GPU that training
-    keeps busy, is most of the cost; a graph replay is a single launch.
+    `max_batch` is accepted and ignored. It used to capture the forward pass as
+    a CUDA graph and replay it with the rows padded out, because an evaluation
+    step is one dragon turn and launch latency dominates. That path silently
+    produced wrong actions and has been removed.
+
+    What it did, measured on 2026-09-24: gen1 against gen4 over 72 games on
+    maps-live scores **0.5972** eagerly and **0.0000** with graphs, and the
+    graph learner acts on 46k rows against its opponent's 513k because its
+    swarm never grows -- it is playing badly from the first turn, not losing
+    late. A mirror match (one net, the same callable on both sides, so only one
+    graph is ever captured) scores exactly 0.5000, and the corruption appears
+    once a *second* graph is captured: capture calls empty_cache(), and the
+    graph captured earlier replays against memory it no longer owns. Nothing
+    cheap fixed it -- not a shared memory pool, not thread_local capture, not a
+    static output tensor, not warming up on the capture stream, not disabling
+    the autocast weight cache.
+
+    The cost of losing it is small and the cost of keeping it was every number
+    this harness produced: 72 games on nine maps takes 154s eagerly.
     """
     wants = getattr(net, "wants_wide", False)
-    if not max_batch:
-        def act(local, scalar, mask, wide=None):
-            with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-                logits, _ = net(torch.from_numpy(local).to(dev), torch.from_numpy(scalar).to(dev),
-                                torch.from_numpy(wide).to(dev) if wants else None)
-                m = torch.from_numpy(mask).to(dev).bool()
-                return masked_logits(logits.float(), m).argmax(dim=1).to(torch.int32).cpu().numpy()
-        act.wants_wide = wants
-        return act
-
-    s_local = torch.zeros(max_batch, bcsim.N_CHANNELS, bcsim.WINDOW, bcsim.WINDOW, device=dev)
-    s_scalar = torch.zeros(max_batch, bcsim.N_SCALARS, device=dev)
-    s_mask = torch.ones(max_batch, bcsim.N_ACTIONS, dtype=torch.bool, device=dev)
-    s_wide = (torch.zeros(max_batch, bcsim.WIDE_CH, bcsim.WIDE_SIDE, bcsim.WIDE_SIDE, device=dev)
-              if wants else None)
-
-    def body():
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            logits, _ = net(s_local, s_scalar, s_wide)
-        return masked_logits(logits.float(), s_mask).argmax(dim=1).to(torch.int32)
-
-    with torch.inference_mode():
-        side = torch.cuda.Stream()
-        side.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(side):
-            for _ in range(3):
-                body()                  # warm up allocations before capture
-        torch.cuda.current_stream().wait_stream(side)
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            s_out = body()
-    pin_l = torch.zeros(max_batch, bcsim.N_CHANNELS, bcsim.WINDOW, bcsim.WINDOW, pin_memory=True)
-    pin_s = torch.zeros(max_batch, bcsim.N_SCALARS, pin_memory=True)
-    pin_m = torch.ones(max_batch, bcsim.N_ACTIONS, dtype=torch.uint8, pin_memory=True)
-    pin_w = (torch.zeros(max_batch, bcsim.WIDE_CH, bcsim.WIDE_SIDE, bcsim.WIDE_SIDE,
-                         pin_memory=True) if wants else None)
 
     def act(local, scalar, mask, wide=None):
-        k = len(local)
-        if k > max_batch:
-            raise ValueError(f"{k} rows > graph batch {max_batch}")
-        pin_l.numpy()[:k] = local
-        pin_s.numpy()[:k] = scalar
-        pin_m.numpy()[:k] = mask
-        if wants:
-            pin_w.numpy()[:k] = wide
-        with torch.inference_mode():
-            s_local.copy_(pin_l, non_blocking=True)
-            s_scalar.copy_(pin_s, non_blocking=True)
-            s_mask.copy_(pin_m.bool(), non_blocking=True)
-            if wants:
-                s_wide.copy_(pin_w, non_blocking=True)
-            graph.replay()
-            return s_out[:k].cpu().numpy()
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+            logits, _ = net(torch.from_numpy(local).to(dev), torch.from_numpy(scalar).to(dev),
+                            torch.from_numpy(wide).to(dev) if wants else None)
+            m = torch.from_numpy(mask).to(dev).bool()
+            return masked_logits(logits.float(), m).argmax(dim=1).to(torch.int32).cpu().numpy()
     act.wants_wide = wants
     return act
 
@@ -382,8 +349,8 @@ def main() -> None:
         # every graph is captured at the full env count, the most rows a step has
         n_envs = (len(opps) + len(nets)) * len(maps) * 2 * max(1, a.games // 2)
         for name, pp, onet in nets:
-            opps.append({"name": name, "act": greedy(onet, dev, n_envs), "path": str(pp)})
-        res = evaluate(greedy(net, dev, n_envs), opps, maps, map_names, games=a.games,
+            opps.append({"name": name, "act": greedy(onet, dev), "path": str(pp)})
+        res = evaluate(greedy(net, dev), opps, maps, map_names, games=a.games,
                        threads=a.threads, max_seconds=a.max_seconds)
         row = {"total_turns": turns, "iter": ck.get("iter"), "ckpt": str(path),
                "time": time.time(), "opponents": {o["name"]: o.get("path", "") for o in opps},
