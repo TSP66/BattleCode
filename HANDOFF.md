@@ -1,3 +1,62 @@
+# Handoff — 2026-09-23 ~10:05: ratchet PAUSED, cloning the top 3, round robin queued
+
+## The ratchet is paused, not finished
+Stopped at **gen 5, 68.7M candidate turns** (experiment total 1.035B). `STOP` was placed and the
+process group killed rather than waiting ~2h for the clean decision point; `latest.pt` is written
+every 10 iterations (~76s) so almost nothing was lost.
+**To resume: `rm runs/ratchet/STOP`, then the launch line in `runs/ratchet/CHANGES.md`.**
+It restarts gen 5 segment 0 from `runs/ratchet/cands/g005_s7/latest.pt`.
+Record: gens 1-4 all promoted. gen4 vs the league: v10 0.625, v9 0.813, sss_r3 0.760,
+sabotage 0.578, shink_r1 0.646, vibing_r4 0.802. **gen4 is the best PPO policy.**
+
+## `make -C bcsim` is DONE (the merge's pending step)
+Verified: privileged build still exposes the 8 globals, and the new `probe()`/`last_deaths()`
+work. The C++ diff removed zero lines, so the simulator core is untouched and the ratchet can
+resume on the new `.so`.
+
+## The harness question, answered
+The first-turn bug **never existed in bcsim** -- there is no first-turn fallback there, every
+simulated turn runs the network, which is exactly why the round robin was blind to it. So a bcsim
+head-to-head was always bug-free; what the fix buys is that local numbers now transfer to the
+server. The real constraint is that v12 is a **708-scalar** clone (mem+memfar) and gen4 is a plain
+14-scalar net: they can only meet through `clone_eval.py`, which attaches a `MemoryTracker` per
+(env, dragon) to the checkpoints that declare those features. Smoke-tested, works.
+
+## Running (all unattended)
+- `runs/assess/` -- gen4 vs v12 and v10, 98 games/opponent on `maps-live`, then 96 on all 12.
+  Note it is CPU-bound in the Python feature builder (GPU ~5%), so it is slow.
+- `runs/cheji_fetch.out` -- cheji bt scrape, 1381 replays.
+- `runs/distill3/run.sh` -> `runs/distill3/chain.out` -- waits for the GPU, then devtest clone,
+  sponge clone, cheji clone (after its scrape + dataset), then the round robin.
+  Recipe is the PR's winner (`full_mem_memfar`): 64x4, hidden 512, 6 epochs, lr 1e-3,
+  `--chunk-games 270`, features mem,memfar.
+
+## Decisions the user made (2026-09-23)
+- dev test 1 :P: clone **2050 at 1.0 + 1302 at 0.5** (2050 is current with only 595 games;
+  1302 has 1361). Needed a new `clone_cache --submission "2050:1,1302:0.5"` (commit e9a37a9).
+- Sponge: submission **2110**. cheji bt: submission **2490** (team id 70, was barely scraped).
+- Round robin: **5 entrants** -- the 3 new clones, ppo_gen4, v12 -- on **all 12 maps**, because
+  `evaluate()` dumps per-map cells, so the live-7 and the unseen-map scores come from one run.
+
+## Unseen maps: which are genuinely unseen
+`help`, `small` and `queen_of_spades_but_she_ages` were **never played on the server**, so no
+replay-trained clone has ever seen them. `arena` and `Colloseum` were in the rotation until
+2026-09-22 12:50, so older clones did see those. That is the clean 3-map novel bucket.
+
+## Map design (NOT to be built yet -- the user asked for a proposal first)
+Feature table over all 12 maps shows what the official set never exercises:
+- **UNIT_LIMIT is never set on any map at all.** Completely untouched axis.
+- **Dragons per team**: live 7 has only 2, 3, 4. No 1 (Colloseum) and no 5-6 (help has 6).
+- **Portals**: 0, 0, 0, 2, 4, 24, 24 -- nothing in between, and no map built around portals.
+- **Pearl coverage**: 14% (schooltime), 34% (devil), 51% (queen), then four at 100%. Nothing
+  below 14%, nothing between 51 and 100.
+- **Symmetry**: every live map is x/y/xy symmetric. The engine allows asymmetric maps (arena,
+  help and small have no SYMMETRY line). Symmetric maps may let a policy lean on mirror priors --
+  note the PR found dev test has a world-frame planner and that left/right is where clones err.
+- **Aspect**: only devil (2:1) and small (2:1) are non-square. Nothing like 64x8.
+- **Topology**: no ring, no single-chokepoint, no maze.
+
+---
 # Handoff — 2026-09-23 ~10:20: PR #1 merged (first-turn fix + remembered-map inputs)
 
 `origin/distill-devtest-features` is merged into local `main` (merge commit, nothing pushed).
