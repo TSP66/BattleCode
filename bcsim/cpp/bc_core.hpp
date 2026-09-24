@@ -191,10 +191,11 @@ struct Dragon {
     // so these sum to the number of sonars sent -- measured against the engine,
     // see SONAR.md. Filled while the dragon acts and reported in its next block.
     int32_t echo[SONAR_ECHO_KINDS] = {};
-    // The protocol this dragon has declared. It is per dragon, not per team:
-    // the engine runs one bot instance per dragon (it spawns them by dragon id),
-    // so a dragon born from a split starts on the legacy protocol until its own
-    // first reply declares otherwise.
+    // The protocol this dragon has declared. It is per dragon, not per team --
+    // measured: when only dragon 0 declared protocol 3, its own teammate got no
+    // ECHOES line and every 64-bit message to it was dropped. A split child
+    // inherits its parent's protocol, so it is not legacy at birth. A dragon
+    // that spawns with the map does start legacy, until its own first reply.
     uint8_t protocol = 2;
 
     void reserve_ring(int want) {
@@ -495,6 +496,11 @@ struct Game {
         Dragon child;
         child.id = (int)dragons.size();
         child.team = parent.team;
+        // A child inherits the parent's protocol rather than starting on the
+        // legacy one: measured on `help`, a child split off in round 0 both
+        // received 64-bit payloads and carried an all-zero ECHOES line on its
+        // very first turn, neither of which a legacy dragon gets.
+        child.protocol = parent.protocol;
         child.reserve_ring(k);
         for (int i = 0; i < k; i++) child.ring[i] = parent.seg(len - 1 - i);
         child.start = 0;
@@ -523,53 +529,69 @@ struct Game {
         if (record_events) events.push_back({EV_SPLIT, dragons[di].id, c.id, k, 0});
     }
 
-    // SONAR: a ray from the head along `facing`, through portals and around the
-    // wrap, stopping at kelp or the first living dragon.
+    // SONAR: a ray from the head, through portals and around the wrap, stopping
+    // at kelp or the first living dragon -- including the dragon that sent it.
     //
     // Under protocol 3 the direction is chosen rather than taken from the
     // dragon's facing, the payload is a full 64 bits, and the ray reports back:
-    // whatever it stopped on is counted into the sender's `echo`. Measured
-    // against the reference engine (SONAR.md): each ray lands in exactly one of
-    // the five categories, so the counts sum to the number of sonars sent, and
-    // a kelp edge stops the ray before a dragon on the far side of it.
+    // whatever it stopped on is counted into the sender's `echo`. Each ray lands
+    // in exactly one of the five categories, so the counts sum to the number of
+    // sonars sent, and a kelp edge stops the ray before a dragon on the far side.
     //
-    // Whoever the ray stops on receives the message -- ally, enemy or, when the
-    // ray wraps the torus, the sender itself. There is no privacy here.
+    // THE ONE RULE THAT IS NOT OBVIOUS, and that we had wrong until it was read
+    // straight off the engine's own replay (tests/sonar_truth.py, 176,704 rays
+    // on all ten official maps, 100% agreement):
+    //
+    //   If the first step enters the segment IMMEDIATELY BEHIND THE HEAD, the ray
+    //   is dragged the whole length of the body and re-emerges from the TAIL,
+    //   travelling along the last body link -- not in the direction it was cast.
+    //
+    // So a dragon curled into an L can cast west and have the ray leave going
+    // south. Entering any *deeper* own segment is an ordinary hit on yourself,
+    // which is how a curled dragon comes to hear its own sonar. The old model
+    // cast a straight line and treated the whole body as transparent, which
+    // agreed only when the body happened to lie straight behind the head; that
+    // is what put per-ray parity at 97.2% on an empty torus and 54.9% on `help`.
+    //
+    // Whoever the ray stops on receives the message -- ally, enemy or the sender
+    // itself. There is no privacy here.
     void cast_sonar(int di, char facing, uint64_t value) {
         const MapData& m = *map;
         Dragon& d = dragons[di];
         const int limit = m.w + m.h;
         stats[ST_SONAR_CAST]++;
         int x = d.head() % m.w, y = d.head() / m.w;
-        // The ray steps out through the sender's own body without seeing it, and
-        // once clear of it the body becomes an ordinary target again -- which
-        // matters on a torus, where a ray with nothing in its way comes back
-        // round and hits the dragon that sent it. Measured both ways against the
-        // engine: stopping at the body immediately gets the backward ray wrong,
-        // never stopping at it gets the forward ray wrong (which then finds
-        // nothing at all on an open map), and this gets both.
-        bool clear_of_self = false;
+        char dir = facing;
+
+        int fx, fy;
+        if (!tile_after_step(m, x, y, dir, fx, fy)) {
+            stats[ST_SONAR_LOST]++;
+            d.echo[SE_KELP]++;
+            return;
+        }
+        // Dragged along the body, leaving from the tail along the last link.
+        // This does NOT depend on the declared protocol: the geometry of the ray
+        // is the same either way, and gating it on protocol 3 made legacy
+        // senders cast straight lines that the engine bends (caught by the
+        // mixed-protocol pass of tests/parity_sonar.py). What the protocol
+        // governs is only the ECHOES line and whether a wide payload can land.
+        if (d.len >= 2 && m.idx(fx, fy) == d.seg(1)) {
+            const int16_t tail = d.seg(d.len - 1), prev = d.seg(d.len - 2);
+            const char nd = direction_between(m, prev % m.w, prev / m.w,
+                                              tail % m.w, tail / m.w);
+            if (nd) dir = nd;
+            x = tail % m.w; y = tail / m.w;
+        }
+
         for (int i = 1; i <= limit; i++) {
             int nx, ny;
-            if (!tile_after_step(m, x, y, facing, nx, ny)) {
+            if (!tile_after_step(m, x, y, dir, nx, ny)) {
                 stats[ST_SONAR_LOST]++;
                 d.echo[SE_KELP]++;
                 return;
             }
             x = nx; y = ny;
             const int16_t occ = owner[m.idx(x, y)];
-            // Under protocol 3 a dragon's own body is transparent to its own
-            // sonar: the ray goes straight through and neither stops there nor
-            // delivers. Measured against the engine -- a dragon whose southward
-            // ray runs down its own tail is told "kelp", where counting the tail
-            // would have said "ally" (tests/parity_sonar.py).
-            //
-            // The legacy protocol does *not* do this: the ray stops on the
-            // sender's own body and the sender receives its own message, which
-            // is what tests/test_vecenv.py checks against the engine. So this is
-            // one of the things 1.0.0 changed, not a rule we had wrong before.
-            if (occ >= 0 && occ == di && d.protocol >= 3 && !clear_of_self) continue;
-            if (occ != di) clear_of_self = true;
             if (occ >= 0) {
                 if (occ == di) stats[ST_SONAR_SELF]++;
                 stats[ST_SONAR_HIT]++;
@@ -577,7 +599,15 @@ struct Game {
                 const bool ally = dragons[occ].team == d.team;
                 d.echo[ally ? (head ? SE_ALLY_HEAD : SE_ALLY)
                             : (head ? SE_ENEMY_HEAD : SE_ENEMY)]++;
-                dragons[occ].inbox.push_back(value);
+                // A receiver still on the legacy protocol cannot express a
+                // payload wider than 32 bits, and the engine drops it rather
+                // than truncating: measured with one team declaring protocol 3
+                // and the other not, 114 of 114 wide messages to a legacy
+                // dragon were dropped, while the same rays carrying a 32-bit
+                // payload all arrived. The echo above is unaffected -- the
+                // sender still learns what it hit.
+                if (dragons[occ].protocol >= 3 || value <= 0xFFFFFFFFull)
+                    dragons[occ].inbox.push_back(value);
                 if (record_events)
                     events.push_back({EV_SONAR_HIT, d.id, dragons[occ].id,
                                       (int32_t)(uint32_t)value, 0});

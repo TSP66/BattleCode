@@ -68,46 +68,52 @@ one tile so the 7x7 window always contains the target and the mask always forbid
 moving onto a body (396 masked games: 372 kills, all 372 head-ons). It now also
 runs unmasked and reaches 296 non-head-on kills, all 296 paid.
 
-## SONAR IS NOT READY — do not train it yet
+## SONAR IS EXACT — 2026-09-24
 
-Asked directly whether the 1.0.0 sonar rules are in per spec, the answer is no.
-Measured 2026-09-24, four rays per turn (what we would actually train with),
-comparing echoes and messages semantically:
+Sonar now matches the reference engine **byte for byte**. `tests/parity_sonar.py`
+drives engine and simulator in lockstep across three protocol regimes on all ten
+official maps: **0 blocks differing out of 423,669 turns carrying 1,159,721
+messages.**
 
-| map | kelp | ECHOES match | msgs match | turns |
-|---|---|---|---|---|
-| big_empty | **0** | **92.0%** | 80.8% | 48,580 |
-| help | many | **54.9%** | 32.4% | 60,930 |
-| arena | 44 | 64.9% | 64.9% | 77 |
-| default | | 98.1% | 97.8% | 4,006 |
+**What broke the deadlock: the engine ships a Cap'n Proto replay that records
+every single ray** — sender, direction, payload, origin tile, **end tile**, the
+dragon hit and its echo classification. `tests/replay.py` reads it (schema taken
+from the accessors in the `replay-viewer.vsix` unswbc ships). Months of hypotheses
+had been inferred from inside a bot, where `ECHOES` is a direction-less aggregate
+and messages carry no sender, so a targeting bug and a classification bug are
+indistinguishable. **Read the debug artefact a black box ships before theorising
+about the black box.**
 
-`tests/parity_sonar.py` **FAILS on all 10 official maps** under protocol 3. Tile
-and body parity is 100%, so this is sonar alone. Legacy protocol 2 stays
-byte-identical, so nothing submitted is affected.
+The rule we had wrong: **a ray whose first step enters the segment immediately
+behind the head is dragged the length of the body and leaves from the TAIL, along
+the last body link** — so a curled dragon can cast west and have the ray leave
+south. Entering a deeper own segment is an ordinary self-hit. `tests/sonar_truth.py`
+predicts every ray independently of our simulator: **176,704 rays, 100.00%, all
+ten maps.** Three protocol rules also had to be fixed: the protocol is per dragon
+(not per team), a split child inherits its parent's (so it must be applied before
+the action), and a payload wider than 32 bits is dropped for a legacy receiver.
+The directed `SONAR <dir> <u64>` form is accepted regardless of protocol — gating
+it, and gating the ray geometry, were both bugs the mixed regime caught.
 
-**An earlier note in SONAR.md and this file said "the echo path is safe to train
-on". That was wrong and is retracted.** It was measured with one ray per turn,
-which was too weak an instrument; `big_empty` has no kelp at all and still only
-matches 92%. Aggregate message totals look close (191,457 against 191,455) only
-because we are over on 4,343 turns and under on 4,377 — totals cancelling is not
-agreement.
+Full detail and the retracted claims are in SONAR.md.
 
 What is and is not done against the spec in NIGHT_OBJECTIVES.md:
 
 | asked for | state |
 |---|---|
-| 64-bit messages | in the engine |
-| a different message per cardinal direction each turn | in the engine |
-| hearing echoes of what sonars hit | in the engine, **55–98% correct by map** |
-| broadcast in every direction every turn | in the engine, metered at 0.51M points/turn |
-| **56-bit parent→child memory code after a split** ("the most important thing") | `train/memcodec.py` trains standalone; **wired to nothing**, and blocked on the message path |
+| 64-bit messages | done, exact |
+| a different message per cardinal direction each turn | done, exact |
+| hearing echoes of what sonars hit | done, **exact on all ten maps** |
+| broadcast in every direction every turn | done, metered at 0.51M points/turn |
+| **56-bit parent→child memory code after a split** ("the most important thing") | `train/memcodec.py` trains standalone; **still wired to nothing** — but the message path it needs is now verified, so it is unblocked |
 | phase 2: inline-head messaging, one-way-street sharing | not started (you marked it low priority) |
 
-Two more things that block using sonar at all:
+Two things still stand between "the rules are exact" and "a policy uses sonar":
 
 * **`train.py` never enables sonar.** There is no `--sonar` flag and no
   `set_sonar` call, so a PPO run today trains with sonar entirely off and the five
   echo scalars are constant zero. That is *consistent* — just not the upgrade.
+  `bc_vec.hpp` has `set_sonar` and the env exposes it; only the flag is missing.
 * **`mybot` prints no `PROTOCOL` line**, so it speaks legacy sonar. Adopting
   protocol 3 moves the block it parses and needs a `check_bot.sh` pass.
 
@@ -118,8 +124,8 @@ Two more things that block using sonar at all:
   `mybot/net.hpp`, wide planes from `mybot/memory.hpp`, new wasmprobe parity
 * `mybot` speaks legacy sonar (prints no `PROTOCOL`); adopting protocol 3 moves
   the block it parses and needs a `check_bot.sh` pass
-* the sonar kelp residual (~7% on kelp maps); ray length limit and portal
-  crossing are the two untested candidates
+* a pre-existing split-child **facing** mismatch on 2 generated maps
+  (`tests/stress.py`); not sonar, present before this work — see KNOWN_ISSUES.md #5
 * real truncated BPTT for the ConvLSTM; the current result is a one-step floor
 * ratchet4's gate numbers were produced through the broken CUDA-graph harness and
   need remeasuring
@@ -254,9 +260,9 @@ is the only reason recurrence fits at all.
   so each ray stops on one thing. Broadcasting all four directions gives a
   histogram and throws the direction away; one direction gives a clean reading.
 - **The enemy receives our messages** (own 18, ally 255, enemy 234 in one game).
-- Our simulator: legacy path **byte-identical**; protocol 3 exact on a kelp-free
-  map, **~7% out on maps with kelp** (we say kelp where the engine says a dragon).
-  Six hypotheses falsified with numbers in SONAR.md.
+- Our simulator: **byte-identical to the engine on all ten official maps, under
+  legacy, protocol 3 and mixed protocols** (fixed 2026-09-24; see the SONAR IS
+  EXACT section above and SONAR.md).
 - Echo features are wired in behind `BattlecodeVecEnv(sonar=True)`, off by default
   because broadcasting changes what opponents see through SC_NUM_MSGS.
 

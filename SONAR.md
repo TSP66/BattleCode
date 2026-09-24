@@ -1,316 +1,210 @@
-# Sonar under unswbc 1.0.0 — measured, not guessed
+# Sonar under unswbc 1.0.0 — SOLVED, and byte-identical
 
-Everything below was read off the reference engine by `bcsim/tests/probe_sonar.py`,
-which drives the real WASM engine through `tests/oracle.py` and reports what
-comes back. The helper headers give the wire format; they do not give the rules,
-and the rules are not what we assumed.
+**Status (2026-09-24): our simulator matches the reference engine exactly.**
+`tests/parity_sonar.py` drives the engine and our text simulator in lockstep and
+compares every round block byte for byte, across three protocol regimes on all
+ten official maps: **0 blocks differing out of 423,669 turns, carrying 1,159,721
+messages.** The legacy path is unchanged and still exact.
 
-Rerun it with:
+    python bcsim/tests/parity_sonar.py       # lockstep block parity, 3 regimes
+    python bcsim/tests/sonar_truth.py        # per-ray truth from the engine's replay
 
-    python bcsim/tests/probe_sonar.py ../maps-official/default_small.map
+## What unlocked it: the engine's replay is the source of truth
 
-## The thing that gates all of it: `PROTOCOL 3`
+Every earlier attempt inferred the rules from *inside a bot*, where the
+observation block is deliberately lossy — `ECHOES` is one aggregate with no
+bearing and messages carry no sender, so a targeting bug and a classification bug
+look identical. Eight hypotheses were tested and rejected that way.
 
-The engine speaks the new sonar only to a bot that asks for it, and the shipped
-helper asks **on every turn**, immediately before `ENDTURN`:
+The engine ships a Cap'n Proto replay, and it records **every single ray**:
+
+    EventSonarPing { senderId, direction, value64, origin, end, hitId, hitKind }
+
+`origin` and `end` are the tiles the ray started and stopped on, `hitId` the
+dragon it reached, `hitKind` one of `empty/kelp/ally/ally_head/enemy/enemy_head`.
+That is per-ray, tile-level ground truth — no inference at all.
+
+`tests/replay.py` reads it (packed encoding, far pointers, the lot). There is no
+shipped `.capnp` schema; the struct layout was read off the accessors in the
+replay viewer unswbc ships (`replay-viewer.vsix` →
+`extension/dist/webview/webview.js`), which is generated from the real schema.
+Struct ids and `formatVersion` are checked on every parse so a format change
+fails loudly instead of being misread.
+
+**Lesson worth keeping: when a black box ships a debug artefact, read it before
+forming hypotheses about the black box.** This cost several sessions of guessing
+that a 20-minute look at the `.vsix` would have prevented.
+
+## The rule we had wrong: a ray is dragged along its own body
+
+    If the first step enters the segment IMMEDIATELY BEHIND THE HEAD, the ray is
+    dragged the whole length of the body and re-emerges FROM THE TAIL, travelling
+    along the last body link — not in the direction it was cast.
+
+So a dragon curled into an L can cast **west** and have the ray leave going
+**south**. Entering any *deeper* own segment is an ordinary hit on yourself,
+which is how a curled dragon comes to hear its own sonar.
+
+The old model cast a straight line and treated the whole body as transparent.
+That agrees only when the body happens to lie straight behind the head, which is
+why it looked nearly right: 97.2% per-ray on an empty torus, and 54.9% on `help`.
+
+`tests/sonar_truth.py` reconstructs the board from the replay, predicts each ray
+independently of our simulator, and compares: **176,704 rays, 100.00%, all ten
+official maps, 0 state-rebuild mismatches.** It is a standing test, so the rule
+cannot quietly rot.
+
+Worth noting how the rule was pinned: dragon 1, body `[(15,11),(14,11),(14,12)]`,
+cast **W**, and the engine logged the ray leaving **S** from `(14,12)`. Its four
+rays came back as N, E, S, S — no W at all. A straight-line model cannot produce
+that; only the body-following one can.
+
+## The three rules about the protocol
+
+Measured, each with a dedicated experiment, and all three are load-bearing:
+
+1. **The protocol is per DRAGON, not per team.** When only dragon 0 declared
+   protocol 3, its own teammate got no `ECHOES` line at all and every 64-bit
+   message to it was dropped.
+2. **A split child inherits its parent's protocol**, so it is not legacy at
+   birth. A child split off in round 0 both received 64-bit payloads and carried
+   an all-zero `ECHOES` line on its very first turn. The declaration therefore
+   has to be applied *before* the action, or a child born this turn inherits a
+   stale value — that was the last of the ten maps to go green.
+3. **A payload wider than 32 bits is DROPPED for a receiver still on the legacy
+   protocol**, not truncated. With one team declaring protocol 3 and the other
+   not, 114 of 114 wide messages to a legacy dragon were dropped, while the same
+   rays carrying a 32-bit payload all arrived. The sender's echo still counts the
+   hit — only the message is withheld.
+
+And one that is *not* a rule: **the directed `SONAR <dir> <u64>` form is accepted
+whatever protocol the dragon has declared.** A dragon that never declares
+protocol 3 still casts directed rays, and protocol-3 dragons still hear them. The
+protocol governs only what a dragon *receives* (its `ECHOES` line, and whether a
+wide payload can land). Gating the cast on protocol 3 — and gating the
+body-dragging geometry on it — were both bugs, caught only by the mixed regime.
+
+The mixed regime exists in `parity_sonar.py` precisely because neither of those
+was visible when every dragon ran the same protocol.
+
+## Message delivery timing
+
+    a ray is resolved and delivered IMMEDIATELY, and the receiver reads it on its
+    own next turn.
+
+So a receiver later in the sending round reads it that same round (lag 0, 262
+cases), one that has already acted reads it next round (lag +1, 227), and a
+dragon that hits itself reads it next round (lag +1, 18). Inboxes are emptied at
+the round boundary. This was already right and was never the bug.
+
+Measured with round-unique payloads. An earlier pass of this measurement used a
+payload that repeated every round, which made the pairing ambiguous and the lag
+histogram meaningless — the same mistake as quoting aggregate message totals
+below. **Tag every probe payload uniquely.**
+
+## Wire format
+
+### `PROTOCOL 3` gates everything
+
+The engine speaks the new sonar only to a bot that asks, and the shipped helper
+asks **on every turn**, immediately before `ENDTURN`:
 
     PROTOCOL 3
     ENDTURN
 
-This is not a one-time handshake. Without it the engine stays on the old
-protocol: no `ECHOES` line, and `SONAR <uint64>` capped at 32 bits.
+Not a one-time handshake. Without it: no `ECHOES` line, and `SONAR <uint64>`
+capped at 32 bits. **`mybot/` does not print `PROTOCOL` at all**, so everything
+submitted so far has run as legacy. Adopting protocol 3 moves the block our
+`obs.hpp` parses — see SUBMITTING.md before changing it.
 
-**`mybot/` does not print `PROTOCOL` at all**, so every version we have
-submitted has been running as the legacy protocol. That is why the block format
-our `obs.hpp` parses has kept matching and why we have never seen an echo. It
-also means adopting protocol 3 changes the block we parse — see below.
-
-Measured: broadcasting in all four directions for 16,024 sonars produced **zero**
-echoes and **zero** received messages until `PROTOCOL 3` was added, and then
-echoes appeared on 598 of 602 turns.
-
-## Sending
+### Sending
 
     SONAR <N|E|S|W> <uint64>     directed, full 64 bits
     SONAR <uint32>               legacy, along the current facing only
 
-C++ helper (`templates/cpp/helper.hpp:383`):
-
-```cpp
-void send_sonar(Direction direction, std::uint64_t message);
-bool send_sonar(std::uint64_t message);   // false if message > UINT32_MAX
-```
-
 A dragon may send **one message per cardinal direction in the same turn** — four
-separate `SONAR` lines, each with its own payload. Sonar does not consume the
-turn's action; it is sent alongside `MOVE` or `SPLIT`.
+`SONAR` lines, each with its own payload. Sonar does not consume the turn's
+action; it is sent alongside `MOVE` or `SPLIT`, and is cast **after** the action,
+from where the dragon ends its turn. The full 64 bits survive, top bit included.
 
-The full 64 bits survive intact, top bit included: 507 payloads carrying bit 63
-and a check byte arrived with **0 corrupted**.
-
-## Receiving messages
+### Receiving messages
 
     NUM_MSGS <n>
     <uint64>          x n
 
-`get_sonar_messages()` returns them "in the order they were sent". There is **no
-sender id and no direction of arrival** — which is exactly why a child needs a
-tag byte to recognise its parent.
+No sender id and no bearing — which is exactly why a child needs a tag byte to
+recognise its parent. Several can land in one turn; four is reachable.
 
-Measured over one game, messages received per turn: 0 x245, 1 x227, 2 x112,
-3 x16, 4 x2. So several can land in one turn, and four is reachable.
+**The enemy receives our messages**, and we receive theirs. Anything we encode is
+readable by the opponent, so a parent-to-child memory code is not private. A
+dragon can also hear its own sonar.
 
-By sender: **own 18, ally 255, enemy 234.**
-
-Two consequences:
-
-- **The enemy receives our messages.** Anything we encode is readable by the
-  opponent, and we receive theirs. A parent-to-child memory code is not private.
-- **A dragon can hear its own sonar**, because a ray can wrap the torus and come
-  back to the sender.
-
-## Receiving echoes
+### Receiving echoes
 
     ECHOES <kelp> <ally> <ally_head> <enemy> <enemy_head>
 
-Placed **between the messages and the 49 tile lines** — so it shifts every
-offset after it. `tests/blockparse.py` does not know about it and will
-mis-parse a protocol-3 block.
+Sits **between the messages and the 49 tile lines**, so it shifts every offset
+after it; `tests/blockparse.py` does not know about it and will mis-parse a
+protocol-3 block. Present on every turn for a dragon on protocol 3, all zeros
+when nothing was sent.
 
-```cpp
-struct SonarEchoes { int kelp, ally, ally_head, enemy, enemy_head; };
-```
+**The five counts sum to exactly the number of rays sent**, so each ray
+terminates on exactly one thing and is classified into exactly one category. A
+ray does not pass through and tally what it crosses. A kelp edge stops the ray
+before an adjacent dragon.
 
-The semantics, measured:
+The design consequence: **echoes are one aggregate for the whole turn, with no
+direction attached.** Broadcasting in all four directions returns a histogram of
+the surroundings and throws the bearing away; sending in *one* direction gives an
+unambiguous reading that way. Which is better is empirical, and both are cheap,
+so the feature set should allow either.
 
-- The line is **always present** under protocol 3 (1607 of 1611 turns; absent
-  only on the first turns, before anything has been sent).
-- **The five counts sum to exactly the number of sonars sent that turn.**
-  Sending 0 gives `(0,0,0,0,0)` on all 1607 turns; sending 1 gives a sum of 1 on
-  all 1607 turns; sending 4 gives tuples like `(4,0,0,0,0)` and `(3,1,0,0,0)`.
-- So **each ray terminates on exactly one thing** and is classified into exactly
-  one of the five categories. A ray does not pass through and tally what it
-  crosses.
-- A kelp edge stops the ray **before** an adjacent dragon: 439 turns had a
-  dragon immediately north and still reported kelp.
+## Cost
 
-The single most important consequence for design:
+`wasmprobe/meter_bot.sh`, four directed sonars with full 64-bit payloads plus
+`PROTOCOL 3` appended to the same buffered write:
 
-> **Echoes are one aggregate for the whole turn, with no direction attached.**
-> Broadcasting in all four directions returns a histogram of what surrounds the
-> dragon and throws the bearing away. Sending in *one* direction returns an
-> unambiguous reading of what lies that way.
+    turn            9            10            11
+    baseline    68,925,455    68,915,296    68,915,080
+    + 4 sonars  69,438,386    69,428,227    69,428,011
+    delta          512,931       512,931       512,931
 
-So "send in every direction every turn" buys a 4-way summary; rotating the
-direction buys bearings over four turns. Which is better is an empirical
-question, and both are cheap, so the feature set should let the policy have
-either.
+**0.51M points a turn, 0.6% of the cap**, identical every turn, because the lines
+join the write the bot already makes rather than adding writes. So "broadcast in
+every direction every turn" is affordable. Computing a *useful* payload is the
+real cost: the codec's encoder adds ~3.3M, about 3.8M in total.
 
-Single-ray readings due north, 1607 turns: kelp 1106, ally body 260, ally head
-160, enemy body 43, enemy head 38.
+## Retracted claims
 
-## The sender's own body
+Kept so they are not re-derived:
 
-**The ray steps out through it, and then it counts again.** Neither of the two
-obvious rules is right. Measured on `big_empty`, which has no kelp at all, one
-ray per turn, by direction (N is forward, S is straight back down the tail):
+- ~~"Without kelp we are essentially exact; with kelp we are about 7% out."~~ The
+  residual was never mainly about kelp. It was the body-dragging rule, which
+  shows up wherever a body is not straight behind the head.
+- ~~"The echo path is safe to train on."~~ It was 54.9%–98% by map. It is safe
+  now, for a different reason: it is exact.
+- ~~"A dragon's own body is transparent to its own sonar."~~ Only the one segment
+  behind the head is, and entering it bends the ray.
+- ~~"Aggregate message counts agree (191,457 vs 191,455)."~~ They cancelled: over
+  on 4,343 turns, under on 4,377. **A total agreeing is not agreement.**
+- ~~"A split child starts on the legacy protocol until its own first reply."~~ It
+  inherits the parent's.
+- ~~"The directed form exists only in protocol 3."~~ It is always accepted.
 
-| rule | N | E | S | W |
-|---|---|---|---|---|
-| stop at own body immediately | 0 | 0 | **2974** | 0 |
-| never stop at own body | **2992** | **622** | **2992** | **622** |
-| leave it, then it counts | **0** | **0** | 18 | **0** |
+Hypotheses tested and rejected earlier, all superseded by the body-dragging rule
+but recorded so they are not retried: reading the direction letter in the
+dragon's own frame; the ray reflecting off kelp; a dragon behind a kelp edge
+still being heard; kelp as a fallback rather than a terminator; casting from the
+pre-move position; three models of when an inbox is cleared; a stale `head_at`;
+duplicate delivery; a different ray length limit; portals.
 
-The kelp-free map is what made this visible: on an open torus a ray with nothing
-in its way travels the whole way round and comes back to the dragon that sent
-it. Stopping immediately gets the backward ray wrong; never stopping gets the
-forward ray wrong, and that ray then finds nothing at all and reports an empty
-echo where the engine reports an ally.
+## Still open
 
-The legacy protocol does none of this -- there the ray stops on the sender's own
-body at once and the sender receives its own message. `tests/test_vecenv.py`
-checks the legacy path against the engine and fails if that is changed.
-
-## Who receives
-
-Delivery is to **any segment**, not only a head: over one game, 501 rays stopped
-on a dragon (counted from the echoes) and exactly 501 messages were received.
-
-## Where our simulator still differs
-
-`tests/parity_sonar.py` drives the engine and our simulator in lockstep and
-compares every block. The legacy protocol is **byte-identical** on every map
-tried. Under protocol 3, driving one ray per turn instead of four localises what
-is left -- with four, the echo is a direction-less aggregate and cannot see a ray
-going the wrong way:
-
-| map | kelp edges | N | E | S | W | turns |
-|---|---|---|---|---|---|---|
-| big_empty | 0 | 0 | 0 | 18 | 0 | 3000 |
-| default_small | 72 | 111 | 121 | 109 | 126 | 1611 |
-| arena | 44 | 10 | 15 | 17 | 5 | 82 |
-
-**CORRECTION (2026-09-24). The "essentially exact without kelp" claim below was
-measured with ONE ray per turn and does not survive four.** Broadcasting in all
-four directions -- which is what we would actually train with -- and comparing the
-echo tuple and the message multiset *semantically* (so that a message-count
-difference cannot shift the lines and masquerade as an echo difference):
-
-| map | kelp | ECHOES match | msgs match | our msgs / engine's | turns |
-|---|---|---|---|---|---|
-| big_empty | **0** | **92.0%** | 80.8% | 191,457 / 191,455 | 48,580 |
-| help | many | **54.9%** | 32.4% | 205,203 / 208,436 | 60,930 |
-| arena | 44 | 64.9% | 64.9% | 74 / 83 | 77 |
-| devil | | 75.4% | 70.5% | 8,439 / 9,138 | 6,109 |
-| trophy | | 91.5% | 89.8% | 12,269 / 12,392 | 4,524 |
-| default_small | 72 | 91.4% | 88.7% | 473 / 507 | 602 |
-| default | | 98.1% | 97.8% | 11,316 / 11,320 | 4,006 |
-
-Tile and body parity is **100%** on every map, so nothing else in the simulator is
-implicated -- this is sonar alone.
-
-Two things follow, and they matter more than the kelp story:
-
-* **`big_empty` has no kelp at all and still only matches 92%.** So the residual is
-  not only about kelp, and the one-ray measurement below was too weak an
-  instrument to see it.
-* **Aggregate message counts agree far better than per-turn ones** (191,457 against
-  191,455 on big_empty) because we are over by 4,343 turns and under by 4,377.
-  Totals cancelling is not agreement, and quoting the total was misleading.
-
-**So the echo path is NOT safe to train on**, which reverses what this file said
-before. At 54.9% on `help`, a policy would be learning a sonar model that does not
-transfer to the judge. `tests/parity_sonar.py` FAILS on all 10 official maps under
-protocol 3; its first reported difference is `NUM_MSGS` at round 0, where we
-deliver messages the engine does not.
-
-The legacy protocol 2 path remains **byte-identical on all 10 maps**, 0 blocks
-differing, so nothing already submitted is affected.
-
---- original text, kept because the kelp shape it describes is still real ---
-
-**Without kelp we are essentially exact; with kelp we are about 7% out.** So
-what remains is the ray's interaction with kelp, not its geometry, not its
-treatment of the sender, and not the echo categories. The mismatches are almost
-entirely one shape: we report `kelp` where the engine reports a dragon
-(ours kelp -> engine ally_head x104, ours kelp -> engine ally x103).
-
-Message timing inherits the same residual, and aggregate message counts agree.
-
-Hypotheses tested and **rejected**, recorded so they are not tried again:
-
-- reading the direction letter in the dragon's own frame rather than as a compass
-  bearing -- triples the mismatches, and breaks the forward-ray case which is
-  exact (that exactness is itself the evidence for absolute, since the two
-  readings agree there and nowhere else);
-- the ray reflecting off kelp and continuing back -- much worse
-  (823/791/1182/1242 on default_small);
-- a dragon on the far side of a kelp edge still being heard -- worse
-  (293/121/309/466);
-- kelp as a fallback rather than a terminator, the ray walking through it and
-  reporting kelp only if it never finds a dragon -- much worse
-  (1205/1457/1215/1458), and it also cannot be right because the engine reports
-  kelp on 1106 of 1611 single-ray turns, which a ray that never stops at kelp
-  would not do;
-- a ray hitting the sender's own head after wrapping while passing through its
-  body -- no change;
-- casting from the pre-move rather than the post-move position -- worse;
-- three different models of when an inbox is cleared.
-
-**Superseded by the correction above: neither path is safe to train on yet.** The
-message path is what the parent-to-child memory codec rides on, so the codec is
-blocked until this is fixed.
-
-## Message delivery: MEASURED, and it was not the bug
-
-`tests/probe_sonar_timing.py` sends exactly one sonar, from one dragon, in one
-direction, with a payload encoding sender and round, so every delivery is
-unambiguous. The rule:
-
-* a ray is resolved and delivered **immediately**, not at a round boundary;
-* the receiver reads it on **its own next turn**. So if the receiver sits later in
-  the sending round it reads the message that same round (lag 0, 561 of 609
-  cross-dragon deliveries on `default_small`), and if it has already acted it
-  reads it next round (lag +1).
-
-**That is exactly what our simulator already does**, so the `NUM_MSGS` difference
-at round 0 is not a timing bug. It is a targeting bug: we deliver to dragons the
-engine's ray never reaches.
-
-## Per-ray truth, and what is actually left
-
-`tests/probe_sonar_rays.py` makes every payload globally unique — (round, sender,
-direction) — so each ray can be paired with the engine's. This is the instrument
-that should have existed from the start; aggregate echo counts cannot separate a
-targeting error from a classification error.
-
-```
-big_empty      97.20% of 191,463 rays agree    (no kelp, NO PORTALS)
-    ours=other  engine=other   4318 (2.26%)   we hit a different dragon
-    ours=SELF   engine=other    599 (0.31%)
-    ours=other  engine=SELF     423 (0.22%)
-default_small  87.45% of 518 rays
-    ours=nobody engine=other     31 (5.98%)   engine reaches a dragon, we stop
-    ours=nobody engine=SELF      14 (2.70%)
-arena          69.23% of 91 rays
-```
-
-So there are **two** faults, not one:
-
-1. **On kelp maps our ray stops short** (`ours=nobody engine=other`). This is the
-   old "we say kelp, the engine says dragon" shape.
-2. **On a map with no kelp and no portals we still hit a different dragon on 2.8%
-   of rays.** This one is new information and it rules out both of the candidates
-   this file previously named as the remaining suspects.
-
-Ruled out, with the measurement, so they are not tried again:
-
-* **delivery timing** — measured above, ours already matches;
-* **`head_at[]` being stale** — replacing it with `dragons[occ].head() == tile`
-  gives byte-identical results (3,085 mismatching turns either way), so the grid
-  and the dragon agree;
-* **the direction label** — comparing deliveries while *ignoring* which direction
-  each ray was credited to does not improve agreement (89.65% of sender-turns,
-  which is the same ~2.8% per ray), so the four payloads are not permuted;
-* **own body always transparent** (variant B) — much worse, 18.2% of echo turns
-  mismatch against 6.5% for the current rule;
-* **duplicate delivery / an inbox that is not cleared** — every unique ray is
-  received exactly once on both sides, on every map;
-* **the ray's length limit** — a wrong limit would show as one side finding
-  nobody; that happens on 14 rays out of 191,463 on `big_empty`;
-* **portals** — no official map has a portal whose partner edge turns the ray, and
-  `big_empty` has **no portals at all** yet still disagrees. (`tile_after_step`
-  does not rotate the heading when a portal changes edge orientation, which would
-  be a real bug on a map that had one. None do.)
-* **the board diverging** — `parity_sonar.py` reports **0 desyncs over 48,580
-  turns**, so turn order and dragon identity match exactly.
-
-### The next step, concretely
-
-Everything cheap is exhausted. What is needed now is to **trace the ray tile by
-tile**, which means exposing the board to the probe so the first dragon along the
-line can be computed independently and compared with both answers. Until then
-"we hit a different dragon on an empty torus" has no mechanism attached to it, and
-guessing has a poor record here — four hypotheses rejected above, three before
-that.
-
-## Still unmeasured
-
-- ~~The point cost of a `SONAR` line.~~ **Measured, and it is cheap.**
-  `wasmprobe/meter_bot.sh` on a copy of mybot that appends four directed sonars
-  with a full 64-bit payload plus `PROTOCOL 3` to the same buffered write:
-
-      turn            9            10            11
-      baseline    68,925,455    68,915,296    68,915,080
-      + 4 sonars  69,438,386    69,428,227    69,428,011
-      delta          512,931       512,931       512,931
-
-  **0.51M points a turn, 0.6% of the cap**, identical on every turn, because the
-  lines join the one write the bot already makes rather than adding writes. So
-  "broadcast in every direction every turn" is affordable. Computing a *useful*
-  payload is the real cost: the codec's encoder is a further 3.3M (train/memcodec),
-  making about 3.8M in total.
-- Whether the engine's ray has a different length limit than our `w + h`, and
-  how it crosses portals. These are the two remaining candidates for the 9%.
-- Why 18 messages in one game decoded as coming from the receiver itself, when
-  protocol 3 makes a dragon's own body transparent to its own ray.
+- **Unrelated, pre-existing:** `tests/stress.py` reports 2 block mismatches on
+  generated maps (`gen23`, `gen78`, splitter policy) where a split child's
+  **facing character** differs (`N` vs `S`). Verified identical at HEAD before
+  any of this work, so it is not sonar. See KNOWN_ISSUES.md.
+- `tile_after_step` does not rotate the heading when a portal changes edge
+  orientation. No official map has such a portal, so it is latent.
+- The `empty` echo kind was never observed: on an open torus a ray always comes
+  back to its own body, so it always terminates on something.

@@ -688,6 +688,11 @@ private:
 
         const int before_len = d.len;
         const int64_t portals_before = e.game.stats[ST_PORTAL_STEP];
+        // Declared before the action, exactly as the engine does it: a split
+        // copies the parent's protocol to the child, so setting it afterwards
+        // would leave a child born this turn on the legacy protocol and unable
+        // to receive a payload wider than 32 bits.
+        if (cfg_.sonar) d.protocol = 3;
         if (a.kind == 0 && a.n_steps > 0) {
             char dirs[MAX_STEPS];
             const int n = a.n_steps > MAX_STEPS ? MAX_STEPS : a.n_steps;
@@ -702,10 +707,9 @@ private:
         if (cfg_.sonar && e.game.dragons[di].alive) {
             // Sensing, not an action: the echo comes back free, so there is no
             // reason not to listen in every direction. The payload is still
-            // zero -- what a dragon should say is the codec's job, and the
-            // message path is not yet verified against the engine (SONAR.md).
-            Dragon& sd = e.game.dragons[di];
-            sd.protocol = 3;
+            // zero -- what a dragon should say is the codec's job. Both the echo
+            // and the message path are now byte-identical to the engine on every
+            // official map (tests/parity_sonar.py, three protocol regimes).
             static const char DIR_OF[SONAR_DIRS] = {'N', 'E', 'S', 'W'};
             for (int k = 0; k < SONAR_DIRS; k++) e.game.cast_sonar(di, DIR_OF[k], 0ull);
         }

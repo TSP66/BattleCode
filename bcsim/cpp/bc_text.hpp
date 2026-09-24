@@ -397,24 +397,31 @@ inline Reply parse_reply(const std::string& text) {
 
 // ------------------------------------------------------------- turn / round
 inline void apply_reply(Game& g, int di, const Reply& r) {
+    // A bot declares its protocol on every turn, so the engine learns it from
+    // the reply. It is per dragon: the engine runs one bot instance per dragon.
+    // This has to happen BEFORE the action, because a split copies the parent's
+    // protocol to the child, and a bot that splits on its very first turn
+    // declares protocol 3 in that same reply -- the engine's child is not
+    // legacy, so ours must not be either.
+    if (r.protocol > 0) g.dragons[di].protocol = (uint8_t)r.protocol;
     switch (r.kind) {
         case ACT_MOVE:  g.move(di, r.dirs.data(), (int)r.dirs.size()); break;
         case ACT_SPLIT: g.split(di, r.split); break;
         default:        g.kill(di, DEATH_ACTION); break;
     }
-    // A bot declares its protocol on every turn, so the engine learns it from
-    // the reply. It is per dragon: the engine runs one bot instance per dragon.
-    if (r.protocol > 0) g.dragons[di].protocol = (uint8_t)r.protocol;
     if (!g.dragons[di].alive) return;
     // Cast after the action, from where the dragon ends its turn: casting from
     // the pre-move position was tested against the engine and lands the rays on
     // different dragons.
     if (r.has_sonar) g.cast_sonar(di, r.sonar);
-    // The directed form exists only in protocol 3; a dragon that has not
-    // declared it gets nothing from a "SONAR N <value>" line. Directions in a
-    // fixed order, so sending all four gives the same echo whatever order they
-    // were printed in.
-    if (g.dragons[di].protocol >= 3) {
+    // The directed form is accepted whatever protocol the dragon has declared --
+    // measured: a dragon that never declares protocol 3 still casts directed
+    // rays, and they still reach and are heard by protocol-3 dragons. What the
+    // protocol governs is the other direction: whether this dragon gets an
+    // ECHOES line, and whether it can be handed a payload wider than 32 bits.
+    // Directions in a fixed order, so sending all four gives the same echo
+    // whatever order they were printed in.
+    {
         static const char DIR_OF[SONAR_DIRS] = {'N', 'E', 'S', 'W'};
         for (int k = 0; k < SONAR_DIRS; k++)
             if (r.send_dir[k]) g.cast_sonar(di, DIR_OF[k], r.sonar_dir[k]);

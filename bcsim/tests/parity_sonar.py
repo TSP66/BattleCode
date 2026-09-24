@@ -25,6 +25,11 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from oracle import OracleGame                   # noqa: E402
 from probe_sonar import parse, payload, safe_dirs, DIRS   # noqa: E402
 
+
+def narrow(did: int, d: int) -> int:
+    """A payload inside 32 bits, which any receiver can be handed."""
+    return ((did & 0xFFF) << 8 | (d & 0x3) << 4 | 0xA) & 0xFFFFFFFF
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 LIB = ctypes.CDLL(str(pathlib.Path(__file__).resolve().parents[1]
                       / "bcsim" / "libbctext.so"))
@@ -66,8 +71,22 @@ class TextSim:
         LIB.bct_destroy(ctypes.c_void_p(self.h))
 
 
-def run(map_text: str, protocol: int) -> dict:
-    """protocol 3 declares it every turn; 2 never does, so ECHOES must stay away."""
+def run(map_text: str, protocol) -> dict:
+    """3 declares it every turn; 2 never does, so ECHOES must stay away.
+
+    "mixed" declares protocol 3 on even dragon ids only. That pins two rules
+    that were measured off the engine and are easy to get wrong:
+
+      * the protocol is per DRAGON, not per team -- when only some dragons
+        declare it, the others get no ECHOES line at all, teammates included;
+      * a payload wider than 32 bits is DROPPED for a receiver still on the
+        legacy protocol, rather than truncated, while the sender's echo still
+        counts the hit.
+
+    A split child inherits its parent's protocol, so an odd-id child of an
+    even-id parent speaks protocol 3 without ever declaring it. That is the
+    engine's behaviour and it is what makes this case worth checking.
+    """
     sim = TextSim(map_text)
     st = {"turns": 0, "diff": 0, "first": None, "echo_turns": 0, "msg_turns": 0,
           "echo_nonzero": 0, "msgs": 0, "desync": 0}
@@ -92,14 +111,21 @@ def run(map_text: str, protocol: int) -> dict:
                 st["first"] = (did, b["round"], ours, text)
             st["diff"] += int(ours != text)
 
-        reply = [f"SONAR {d} {payload(did, k)}" for k, d in enumerate(DIRS)]
+        # Half the rays carry a payload that fits 32 bits and half do not, so
+        # both sides of the "a legacy receiver cannot be handed a wide payload"
+        # rule are exercised on every map. Using only wide payloads made the
+        # protocol-2 pass vacuous: every message was dropped, so 0 arrived and
+        # the ray itself was never compared at all.
+        reply = [f"SONAR {d} {payload(did, k) if k % 2 else narrow(did, k)}"
+                 for k, d in enumerate(DIRS)]
         ok = safe_dirs(b)
         if b["length"] >= 6 and (b["round"] % 7) == 0:
             reply.append(f"SPLIT {b['length'] // 2}")
         else:
             reply.append(f"MOVE {ok[0] if ok else b['dir']}")
-        if protocol >= 3:
-            reply.append(f"PROTOCOL {protocol}")
+        declare = (did % 2 == 0) if protocol == "mixed" else protocol >= 3
+        if declare:
+            reply.append("PROTOCOL 3")
         reply.append("ENDTURN")
         out = "\n".join(reply) + "\n"
         if di >= 0:
@@ -120,13 +146,20 @@ def main() -> int:
     maps = ([pathlib.Path(a) for a in args] if args else
             sorted((ROOT / "maps-official").glob("*.map")))
     bad = 0
-    for protocol in (3, 2):
-        print(f"\n### bots declaring PROTOCOL {protocol}"
-              + ("" if protocol >= 3 else " (never declared: ECHOES must not appear)"))
+    for protocol in (3, 2, "mixed"):
+        label = {3: "### bots declaring PROTOCOL 3",
+                 2: "### bots declaring PROTOCOL 2 (never declared: ECHOES must not appear)",
+                 "mixed": "### only even dragon ids declare PROTOCOL 3 "
+                          "(per-dragon protocol, and 64-bit messages dropped for legacy receivers)"}[protocol]
+        print(f"\n{label}")
         for mp in maps:
             st = run(mp.read_text(), protocol)
             ok = st["diff"] == 0 and st["desync"] == 0 and "error" not in st
-            if protocol >= 3:
+            if protocol == "mixed":
+                # some dragons must have echoes and some must not, or the case
+                # is not actually mixed and proves nothing
+                ok = ok and 0 < st["echo_turns"] < st["turns"]
+            elif protocol >= 3:
                 ok = ok and st["echo_turns"] > 0
             else:
                 ok = ok and st["echo_turns"] == 0

@@ -83,6 +83,26 @@ expected. That's within sampling noise at this size (two standard errors is
 about ±0.11), but if later mirror matches sit clearly below 0.5, look for a
 side (team A/B) bias in the eval setup or the maps.
 
+## 5. A split child's facing can differ from the engine on some geometry
+
+- **What:** `bcsim/tests/stress.py` reports 2 block mismatches, both a body
+  line's **facing character** for a freshly split dragon:
+  `gen23/splitter_policy` dragon 134 turn 1622 (engine `N`, ours `S`) and
+  `gen78/splitter_policy` dragon 25 turn 337 (engine `E`, ours `S`).
+- **Not sonar.** Verified identical at commit `8f4376ad` before the sonar work,
+  so it predates it. Sonar parity is exact (SONAR.md).
+- **Impact:** the facing is one character of one body line in the observation, on
+  generated maps only; no official map has reproduced it. It would matter for
+  observation parity if it happens on a live map, so it is worth fixing before
+  relying on `seg_dir` for a split child.
+- **Lead, not yet verified:** `Game::split` in `bcsim/cpp/bc_core.hpp` derives the
+  child's facing from `opposite(direction_between(...))` over the first two
+  segments, and `direction_between` searches N, E, S, W and returns the *first*
+  direction that connects. That is ambiguous whenever two directions connect the
+  same pair of tiles. Wrap cannot cause it here (generated maps are at least 10 in
+  each dimension), but a **portal** can, and these maps carry several. Confirming
+  that means dumping the child's two segments at the failing turn.
+
 ## Checks that exist now
 
 - `wasmprobe/check_bot.sh <ckpt>`: the pre-upload gate. It checks zip size, a
