@@ -110,11 +110,11 @@ a  = 2(A3_0 − A3_E) / (A3_0 + A3_E)
     [ λ_win(t)  · tanh(r + λ_z · tanh(z))               win condition + tie-break
     + λ_len(t)  · tanh(z)                               dense total-length signal
     + λ_top3(t) · tanh(a)                               eggs in more than one basket
-    + λ_kill(t) · (exp(−N_E/c) − exp(−N_0/c))           finish them off
+    + λ_kill(t) · (exp(−T_E/C) − exp(−T_0/C))           finish them off
     + λ_exp(t)  · tanh(ε · (C_0 − C_E)) ]               explore and fan out
 ```
 
-`λ_z = 0.4`, `c = 4`, `ε = 0.005`, `κ = 1.0`. Every term is antisymmetric under
+`λ_z = 0.4`, `C = 15` segments, `ε = 0.005`, `κ = 1.0`. Every term is antisymmetric under
 team swap, so `Φ_A = −Φ_B` exactly and self-play sees a true zero-sum game.
 
 ### Normalise by Σλ. This is not cosmetic.
@@ -206,19 +206,40 @@ c**, and it is *zero* at `N_E = 0`, the moment you have won:
   c=20  10v10:+0.0000 10v5:-0.0092 10v2:-0.0060 10v1:-0.0034 20v1:-0.0113
 ```
 
-v8 uses a convex function of the enemy count instead, so the last kills are
-worth the most, which is the stated intent:
+v8 uses a convex function instead, so the last kills are worth the most, which is
+the stated intent — but over **total length, not unit count**:
 
 ```
-  Phi_kill = exp(-N_E/c) - exp(-N_0/c),  c = 4
-  10v10:+0.0000 10v5:+0.2044 10v2:+0.5244 10v1:+0.6967 10v0:+0.9179
-  20v1: +0.7721  3v1:+0.3064  3v0:+0.5276
+  Phi_kill = exp(-T_E/C) - exp(-T_0/C),   C = 15 segments
 ```
 
-Antisymmetric, zero at parity, maximal at a wipe-out, and diminishing in `N_0`
-so mass-producing dragons cannot farm it. "Ideally kill the biggest ones" needs
-no extra term: killing a big enemy already drops `L_E` and `T_E` through `r`
-and `z`.
+A team is eliminated exactly when its total reaches zero, so length says the same
+thing about elimination as the count does. Antisymmetric, zero at parity, maximal
+at a wipe-out, and diminishing in our own material so there is nothing to farm.
+
+**Why not the count: it pays for free splits, and I only found this by writing the
+test.** Antisymmetry forces a matching term in our own quantity, and over counts
+that term has `d/dN_0 [−exp(−N_0/c)] > 0` always — so adding a dragon pays,
+whatever it is made of. A split of a non-leader conserves `L`, `T` and `A3`, so
+the finisher was the only term that moved and it paid **+0.019**, about three
+pearls, for nothing. That is v0's shredding rebuilt at a fifth the size, in the
+term I had just written to replace the draft's version of the same mistake.
+
+Over length the same derivative pays us for being *longer*, which is a direction
+we want anyway, and a split becomes **exactly** neutral rather than merely
+outweighed:
+
+```
+  split a non-leader 4 -> 2+2, dPhi at r0/100/250/400/500:
+      +0.00000  +0.00000  +0.00000  +0.00000  +0.00000
+```
+
+Asserted in `tests/test_reward8.cpp` at three values of `C`. Exact indifference is
+a much stronger guarantee than a penalty that happens to be bigger than a bonus,
+and it is the reason to prefer this form even setting the magnitude aside.
+
+"Ideally kill the biggest ones" needs no extra term: killing a big enemy already
+drops `L_E` and `T_E` through `r` and `z`.
 
 ### Dropped: the numerical term and the concentration penalty
 
@@ -438,21 +459,24 @@ against theirs `[22,15,10,5,3]`, κ = 1:
 
 | event | ΔΦ | in pearls |
 |---|---|---|
-| eat a pearl (small dragon) | +0.0078 | 1.0× |
-| eat a pearl (our leader) | +0.0235 | 3.0× |
-| kill their smallest (3) | +0.0520 | 6.6× |
-| kill their 3rd (10) | +0.1175 | 15.0× |
-| **kill their biggest (22)** | **+0.3531** | **45.2×** |
-| our leader (20) just dies | −0.3080 | −39.4× |
-| **trade: our 4 for their 22** | **+0.2997** | **+38.3×** |
-| trade: our 20 for their 22 | +0.0261 | +3.3× |
-| split our leader 20 → 10+10 | −0.0849 | −10.9× |
+| eat a pearl (small dragon) | +0.0065 | 1.0× |
+| eat a pearl (our leader) | +0.0185 | 2.8× |
+| kill their smallest (3) | +0.0195 | 3.0× |
+| kill their 3rd (10) | +0.0747 | 11.5× |
+| **kill their biggest (22)** | **+0.2717** | **41.8×** |
+| our leader (20) just dies | −0.2361 | −36.3× |
+| **trade: our 4 for their 22** | **+0.2502** | **+38.5×** |
+| trade: our 20 for their 22 | +0.0210 | +3.2× |
+| split our leader 20 → 10+10 | −0.0820 | −12.6× |
+| **split a non-leader 4 → 2+2** | **+0.0000** | **0.0×** |
 
-Killing their leader is worth **45 pearls**. Throwing a length-4 dragon away to do
+Killing their leader is worth **42 pearls**. Throwing a length-4 dragon away to do
 it is worth **38 pearls**. Trading our own leader for theirs is worth 3 — nearly
-neutral, correctly, since the bodies were nearly equal. At round 450 the same
-kill is worth 72 pearls and the leader-for-leader trade 6, because `λ_win` has
-taken over.
+neutral, correctly, since the bodies were nearly equal. Splitting a non-leader is
+worth exactly nothing. At round 450 the same kill is worth 70 pearls and the
+leader-for-leader trade 6, because `λ_win` has taken over.
+
+These are generated from `cpp/bc_reward8.hpp` itself, not from a model of it.
 
 This is *strictly better differentiated* than v3's flat `kills: 0.75`, which paid
 the same for killing a length-2 mob dragon as for killing their leader. That
@@ -670,6 +694,9 @@ them would break every saved run's log schema.
   is supposed to police.
 * The draft's finisher term — negative for every numerical advantage at every
   `c` (table above), and zero at the moment of victory.
+* A finisher over **unit count**, `exp(−N_E/c) − exp(−N_0/c)` — pays **+0.019** for
+  a free split of a non-leader, because antisymmetry forces an own-count term whose
+  derivative is positive everywhere. Found by the test, not by inspection.
 * Plain (undiscounted) deltas — injects up to ±0.78 of extra return, comparable
   to the win term, and pays the policy to stall while ahead.
 * Static dispersion, any form — circular variance scores two parked clumps 1.000,
