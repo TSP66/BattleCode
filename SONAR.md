@@ -150,6 +150,45 @@ going the wrong way:
 | default_small | 72 | 111 | 121 | 109 | 126 | 1611 |
 | arena | 44 | 10 | 15 | 17 | 5 | 82 |
 
+**CORRECTION (2026-09-24). The "essentially exact without kelp" claim below was
+measured with ONE ray per turn and does not survive four.** Broadcasting in all
+four directions -- which is what we would actually train with -- and comparing the
+echo tuple and the message multiset *semantically* (so that a message-count
+difference cannot shift the lines and masquerade as an echo difference):
+
+| map | kelp | ECHOES match | msgs match | our msgs / engine's | turns |
+|---|---|---|---|---|---|
+| big_empty | **0** | **92.0%** | 80.8% | 191,457 / 191,455 | 48,580 |
+| help | many | **54.9%** | 32.4% | 205,203 / 208,436 | 60,930 |
+| arena | 44 | 64.9% | 64.9% | 74 / 83 | 77 |
+| devil | | 75.4% | 70.5% | 8,439 / 9,138 | 6,109 |
+| trophy | | 91.5% | 89.8% | 12,269 / 12,392 | 4,524 |
+| default_small | 72 | 91.4% | 88.7% | 473 / 507 | 602 |
+| default | | 98.1% | 97.8% | 11,316 / 11,320 | 4,006 |
+
+Tile and body parity is **100%** on every map, so nothing else in the simulator is
+implicated -- this is sonar alone.
+
+Two things follow, and they matter more than the kelp story:
+
+* **`big_empty` has no kelp at all and still only matches 92%.** So the residual is
+  not only about kelp, and the one-ray measurement below was too weak an
+  instrument to see it.
+* **Aggregate message counts agree far better than per-turn ones** (191,457 against
+  191,455 on big_empty) because we are over by 4,343 turns and under by 4,377.
+  Totals cancelling is not agreement, and quoting the total was misleading.
+
+**So the echo path is NOT safe to train on**, which reverses what this file said
+before. At 54.9% on `help`, a policy would be learning a sonar model that does not
+transfer to the judge. `tests/parity_sonar.py` FAILS on all 10 official maps under
+protocol 3; its first reported difference is `NUM_MSGS` at round 0, where we
+deliver messages the engine does not.
+
+The legacy protocol 2 path remains **byte-identical on all 10 maps**, 0 blocks
+differing, so nothing already submitted is affected.
+
+--- original text, kept because the kelp shape it describes is still real ---
+
 **Without kelp we are essentially exact; with kelp we are about 7% out.** So
 what remains is the ray's interaction with kelp, not its geometry, not its
 treatment of the sender, and not the echo categories. The mismatches are almost
@@ -178,9 +217,9 @@ Hypotheses tested and **rejected**, recorded so they are not tried again:
 - casting from the pre-move rather than the post-move position -- worse;
 - three different models of when an inbox is cleared.
 
-**So the echo path is safe to train on, and the message path is safe only on maps
-without kelp**, which matters because the parent-to-child memory codec rides on
-the message path.
+**Superseded by the correction above: neither path is safe to train on yet.** The
+message path is what the parent-to-child memory codec rides on, so the codec is
+blocked until this is fixed.
 
 ## Still unmeasured
 

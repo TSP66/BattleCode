@@ -68,6 +68,49 @@ one tile so the 7x7 window always contains the target and the mask always forbid
 moving onto a body (396 masked games: 372 kills, all 372 head-ons). It now also
 runs unmasked and reaches 296 non-head-on kills, all 296 paid.
 
+## SONAR IS NOT READY — do not train it yet
+
+Asked directly whether the 1.0.0 sonar rules are in per spec, the answer is no.
+Measured 2026-09-24, four rays per turn (what we would actually train with),
+comparing echoes and messages semantically:
+
+| map | kelp | ECHOES match | msgs match | turns |
+|---|---|---|---|---|
+| big_empty | **0** | **92.0%** | 80.8% | 48,580 |
+| help | many | **54.9%** | 32.4% | 60,930 |
+| arena | 44 | 64.9% | 64.9% | 77 |
+| default | | 98.1% | 97.8% | 4,006 |
+
+`tests/parity_sonar.py` **FAILS on all 10 official maps** under protocol 3. Tile
+and body parity is 100%, so this is sonar alone. Legacy protocol 2 stays
+byte-identical, so nothing submitted is affected.
+
+**An earlier note in SONAR.md and this file said "the echo path is safe to train
+on". That was wrong and is retracted.** It was measured with one ray per turn,
+which was too weak an instrument; `big_empty` has no kelp at all and still only
+matches 92%. Aggregate message totals look close (191,457 against 191,455) only
+because we are over on 4,343 turns and under on 4,377 — totals cancelling is not
+agreement.
+
+What is and is not done against the spec in NIGHT_OBJECTIVES.md:
+
+| asked for | state |
+|---|---|
+| 64-bit messages | in the engine |
+| a different message per cardinal direction each turn | in the engine |
+| hearing echoes of what sonars hit | in the engine, **55–98% correct by map** |
+| broadcast in every direction every turn | in the engine, metered at 0.51M points/turn |
+| **56-bit parent→child memory code after a split** ("the most important thing") | `train/memcodec.py` trains standalone; **wired to nothing**, and blocked on the message path |
+| phase 2: inline-head messaging, one-way-street sharing | not started (you marked it low priority) |
+
+Two more things that block using sonar at all:
+
+* **`train.py` never enables sonar.** There is no `--sonar` flag and no
+  `set_sonar` call, so a PPO run today trains with sonar entirely off and the five
+  echo scalars are constant zero. That is *consistent* — just not the upgrade.
+* **`mybot` prints no `PROTOCOL` line**, so it speaks legacy sonar. Adopting
+  protocol 3 moves the block it parses and needs a `check_bot.sh` pass.
+
 ## Still open
 
 * the counterfactual baseline (above) — the only piece that might need real work
