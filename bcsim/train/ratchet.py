@@ -68,6 +68,13 @@ DEFAULT_LEAGUE = [
     ("submitted v10", ROOT / "runs/anchors708/v10.pt"),
     ("sabotage", ROOT / "runs/anchors708/sabotage_bc_64x4.pt"),
     ("shink_r1", ROOT / "runs/anchors708/shink_r1_bc_64x4.pt"),
+    # The team that is top of the ladder NOW, cloned from its current submission
+    # (3952, held-out action accuracy 0.8035). `sabotage` above is the same team's
+    # submission 546 -- their oldest -- so it stayed in as a fixed yardstick while
+    # this one answers the question that matters: can we beat what is actually
+    # winning. A run started before this clone existed keeps its own league, which
+    # is stored in its state file, so nothing already measured moves.
+    ("sabotage_3952", ROOT / "runs/imitate_sab_3952/best.pt"),
 ]
 
 
