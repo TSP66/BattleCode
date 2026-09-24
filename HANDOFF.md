@@ -29,6 +29,52 @@ for 72 games on nine maps.
 That includes the seg0/seg1 league table below and the promotion of gen1. Re-measure
 before relying on any of it.
 
+## Architecture: FINAL matrix, 1,080 games (runs/roundrobin_arch.json)
+
+```
+score matrix (row against column, both halves pooled, 72 games a pair)
+              pyramid devtest    gen1     v12 convlst    gen4
+pyramid           -     0.500   0.500   0.542   0.646   0.583
+devtest_2050    0.500     -     0.431   0.528   0.583   0.597
+gen1            0.500   0.569     -     0.583   0.403   0.569
+v12             0.458   0.472   0.417     -     0.514   0.583
+convlstm        0.354   0.417   0.597   0.486     -     0.514
+gen4            0.417   0.403   0.431   0.417   0.486     -
+
+Bradley-Terry            mean over 360 games
+  pyramid       +0.182   0.5542 +/- 0.0262   [pyramid]
+  devtest_2050  +0.093   0.5278 +/- 0.0263   [flat]
+  gen1          +0.084   0.5250 +/- 0.0263   [flat]
+  v12           -0.037   0.4889 +/- 0.0263   [flat]
+  convlstm      -0.088   0.4736 +/- 0.0263   [convlstm]
+  gen4          -0.233   0.4306 +/- 0.0261   [flat]
+```
+
+**Read this carefully: ranking first is not the same as being better.** The
+pyramid's lead over the two strongest flat nets is not significant, and head to
+head it is exactly even with both:
+
+```
+  pyramid - gen1       +0.029   0.8 sigma      head to head 0.500
+  pyramid - devtest    +0.026   0.7 sigma      head to head 0.500
+  pyramid - convlstm   +0.081   2.2 sigma      head to head 0.646  (2.5 sigma)
+```
+
+So the only architecture difference the data supports is **pyramid > ConvLSTM**.
+The pyramid's top rank comes from beating the weaker members (convlstm 0.646,
+gen4 0.583, v12 0.542) while drawing the stronger ones, not from beating anything
+strong.
+
+What that is still worth: the pyramid **matches the best flat nets at 0.96M
+parameters against 1.58M and 51.2M judge points against 69.1M**, leaving 29.8M
+spare for sonar features, a codec or a bigger trunk. Same strength, 74% of the
+cost. That is the case for switching, and it is a cost argument rather than a
+strength argument.
+
+Note the non-transitivity: convlstm beats gen1 0.597 but loses to pyramid 0.354
+and devtest 0.417, which is why the matrix and the fit are worth more than any
+single gate.
+
 ## Architecture: planes beat recurrence, and both are level with the flat net
 
 `train/roundrobin.py` (new) plays every saved agent against every other and fits

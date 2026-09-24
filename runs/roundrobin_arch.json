@@ -1,0 +1,409 @@
+{
+ "agents": [
+  {
+   "name": "pyramid",
+   "path": "/home/thomaspetty/BattleCode/runs/pyr_warm/latest.pt",
+   "arch": "pyramid"
+  },
+  {
+   "name": "convlstm",
+   "path": "/home/thomaspetty/BattleCode/runs/lstm_warm/latest.pt",
+   "arch": "convlstm"
+  },
+  {
+   "name": "gen1",
+   "path": "/home/thomaspetty/BattleCode/runs/ratchet4/anchors/gen1.pt",
+   "arch": "flat"
+  },
+  {
+   "name": "gen4",
+   "path": "/home/thomaspetty/BattleCode/runs/anchors708/gen4.pt",
+   "arch": "flat"
+  },
+  {
+   "name": "devtest_2050",
+   "path": "/home/thomaspetty/BattleCode/runs/i2/devtest_2050/best.pt",
+   "arch": "flat"
+  },
+  {
+   "name": "v12",
+   "path": "/home/thomaspetty/BattleCode/runs/submitted/v12.pt",
+   "arch": "flat"
+  }
+ ],
+ "games": [
+  [
+   0.0,
+   72.0,
+   72.0,
+   72.0,
+   72.0,
+   72.0
+  ],
+  [
+   72.0,
+   0.0,
+   72.0,
+   72.0,
+   72.0,
+   72.0
+  ],
+  [
+   72.0,
+   72.0,
+   0.0,
+   72.0,
+   72.0,
+   72.0
+  ],
+  [
+   72.0,
+   72.0,
+   72.0,
+   0.0,
+   72.0,
+   72.0
+  ],
+  [
+   72.0,
+   72.0,
+   72.0,
+   72.0,
+   0.0,
+   72.0
+  ],
+  [
+   72.0,
+   72.0,
+   72.0,
+   72.0,
+   72.0,
+   0.0
+  ]
+ ],
+ "wins": [
+  [
+   0.0,
+   46.5012,
+   36.0,
+   42.0012,
+   36.0,
+   39.0024
+  ],
+  [
+   25.4988,
+   0.0,
+   42.9984,
+   37.0008,
+   29.998800000000003,
+   34.9992
+  ],
+  [
+   36.0,
+   29.001600000000003,
+   0.0,
+   40.9968,
+   41.0004,
+   41.9976
+  ],
+  [
+   29.998800000000003,
+   34.9992,
+   31.0032,
+   0.0,
+   29.0016,
+   30.0024
+  ],
+  [
+   36.0,
+   42.0012,
+   30.9996,
+   42.998400000000004,
+   0.0,
+   37.998000000000005
+  ],
+  [
+   32.997600000000006,
+   37.0008,
+   30.0024,
+   41.9976,
+   34.002,
+   0.0
+  ]
+ ],
+ "strength": [
+  0.1820203366453795,
+  -0.08838568896343107,
+  0.08382136916247185,
+  -0.23347789503297128,
+  0.09314927951153332,
+  -0.037127401322982846
+ ],
+ "cells": {
+  "pyramid": {
+   "convlstm": {
+    "n": 36,
+    "score": 0.6389,
+    "win": 0.6389,
+    "draw": 0.0,
+    "kills": 52.472,
+    "portal": 0.0
+   },
+   "gen1": {
+    "n": 36,
+    "score": 0.5,
+    "win": 0.5,
+    "draw": 0.0,
+    "kills": 47.444,
+    "portal": 0.0
+   },
+   "gen4": {
+    "n": 36,
+    "score": 0.5556,
+    "win": 0.5556,
+    "draw": 0.0,
+    "kills": 52.556,
+    "portal": 0.0
+   },
+   "devtest_2050": {
+    "n": 36,
+    "score": 0.4722,
+    "win": 0.4722,
+    "draw": 0.0,
+    "kills": 53.361,
+    "portal": 0.0
+   },
+   "v12": {
+    "n": 36,
+    "score": 0.5556,
+    "win": 0.5556,
+    "draw": 0.0,
+    "kills": 55.75,
+    "portal": 0.0
+   }
+  },
+  "convlstm": {
+   "pyramid": {
+    "n": 36,
+    "score": 0.3472,
+    "win": 0.3333,
+    "draw": 0.0278,
+    "kills": 47.972,
+    "portal": 0.0
+   },
+   "gen1": {
+    "n": 36,
+    "score": 0.6111,
+    "win": 0.6111,
+    "draw": 0.0,
+    "kills": 41.556,
+    "portal": 0.0
+   },
+   "gen4": {
+    "n": 36,
+    "score": 0.3889,
+    "win": 0.3889,
+    "draw": 0.0,
+    "kills": 44.972,
+    "portal": 0.0
+   },
+   "devtest_2050": {
+    "n": 36,
+    "score": 0.4444,
+    "win": 0.4444,
+    "draw": 0.0,
+    "kills": 51.944,
+    "portal": 0.0
+   },
+   "v12": {
+    "n": 36,
+    "score": 0.5278,
+    "win": 0.5278,
+    "draw": 0.0,
+    "kills": 45.861,
+    "portal": 0.0
+   }
+  },
+  "gen1": {
+   "pyramid": {
+    "n": 36,
+    "score": 0.5,
+    "win": 0.5,
+    "draw": 0.0,
+    "kills": 48.722,
+    "portal": 0.0
+   },
+   "convlstm": {
+    "n": 36,
+    "score": 0.4167,
+    "win": 0.4167,
+    "draw": 0.0,
+    "kills": 44.194,
+    "portal": 0.0
+   },
+   "gen4": {
+    "n": 36,
+    "score": 0.6944,
+    "win": 0.6944,
+    "draw": 0.0,
+    "kills": 57.167,
+    "portal": 0.0
+   },
+   "devtest_2050": {
+    "n": 36,
+    "score": 0.6111,
+    "win": 0.6111,
+    "draw": 0.0,
+    "kills": 68.75,
+    "portal": 0.0
+   },
+   "v12": {
+    "n": 36,
+    "score": 0.5833,
+    "win": 0.5833,
+    "draw": 0.0,
+    "kills": 64.194,
+    "portal": 0.0
+   }
+  },
+  "gen4": {
+   "pyramid": {
+    "n": 36,
+    "score": 0.3889,
+    "win": 0.3889,
+    "draw": 0.0,
+    "kills": 52.167,
+    "portal": 0.0
+   },
+   "convlstm": {
+    "n": 36,
+    "score": 0.3611,
+    "win": 0.3611,
+    "draw": 0.0,
+    "kills": 48.611,
+    "portal": 0.0
+   },
+   "gen1": {
+    "n": 36,
+    "score": 0.5556,
+    "win": 0.5556,
+    "draw": 0.0,
+    "kills": 53.0,
+    "portal": 0.0
+   },
+   "devtest_2050": {
+    "n": 36,
+    "score": 0.3889,
+    "win": 0.3889,
+    "draw": 0.0,
+    "kills": 64.722,
+    "portal": 0.0
+   },
+   "v12": {
+    "n": 36,
+    "score": 0.4167,
+    "win": 0.4167,
+    "draw": 0.0,
+    "kills": 61.306,
+    "portal": 0.0
+   }
+  },
+  "devtest_2050": {
+   "pyramid": {
+    "n": 36,
+    "score": 0.4722,
+    "win": 0.4722,
+    "draw": 0.0,
+    "kills": 57.083,
+    "portal": 0.0
+   },
+   "convlstm": {
+    "n": 36,
+    "score": 0.6111,
+    "win": 0.6111,
+    "draw": 0.0,
+    "kills": 51.361,
+    "portal": 0.0
+   },
+   "gen1": {
+    "n": 36,
+    "score": 0.4722,
+    "win": 0.4722,
+    "draw": 0.0,
+    "kills": 66.139,
+    "portal": 0.0
+   },
+   "gen4": {
+    "n": 36,
+    "score": 0.5833,
+    "win": 0.5833,
+    "draw": 0.0,
+    "kills": 66.056,
+    "portal": 0.0
+   },
+   "v12": {
+    "n": 36,
+    "score": 0.6111,
+    "win": 0.6111,
+    "draw": 0.0,
+    "kills": 93.528,
+    "portal": 0.0
+   }
+  },
+  "v12": {
+   "pyramid": {
+    "n": 36,
+    "score": 0.4722,
+    "win": 0.4722,
+    "draw": 0.0,
+    "kills": 50.028,
+    "portal": 0.0
+   },
+   "convlstm": {
+    "n": 36,
+    "score": 0.5556,
+    "win": 0.5556,
+    "draw": 0.0,
+    "kills": 48.278,
+    "portal": 0.0
+   },
+   "gen1": {
+    "n": 36,
+    "score": 0.4167,
+    "win": 0.4167,
+    "draw": 0.0,
+    "kills": 61.694,
+    "portal": 0.0
+   },
+   "gen4": {
+    "n": 36,
+    "score": 0.5833,
+    "win": 0.5833,
+    "draw": 0.0,
+    "kills": 62.5,
+    "portal": 0.0
+   },
+   "devtest_2050": {
+    "n": 36,
+    "score": 0.5556,
+    "win": 0.5556,
+    "draw": 0.0,
+    "kills": 89.75,
+    "portal": 0.0
+   }
+  }
+ },
+ "maps": [
+  "big_empty",
+  "default",
+  "default_small",
+  "devil",
+  "queen_of_spades",
+  "schooltime",
+  "stronghold",
+  "trauma",
+  "trophy"
+ ],
+ "games_per_cell": 4,
+ "seconds": 3938.6
+}
