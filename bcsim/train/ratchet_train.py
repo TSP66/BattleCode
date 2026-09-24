@@ -171,7 +171,12 @@ def main() -> None:
         if len(wts) != len(opps) or len(opp_names) != len(opps):
             raise SystemExit("--opp-weights/--opp-names need one entry per opponent")
         opp_p = np.array(wts) / sum(wts)
-    print(f"gen {a.gen} segment {a.segment}: policy {width}x{blocks} from {a.init}; "
+    # a pyramid has two branches and no single width, so say which it is rather
+    # than printing "policy 0x0"
+    how = (f"pyramid {shape['near_width']}x{shape['near_blocks']} + "
+           f"{shape['wide_width']}x{shape['wide_blocks']}" if arch == "pyramid"
+           else f"{width}x{blocks}")
+    print(f"gen {a.gen} segment {a.segment}: policy {how} from {a.init}; "
           f"teacher {a.teacher} (KL {a.kl_coef}); lr {a.lr}; self-play {a.self_frac}; "
           "opponents " + ", ".join(f"{n} {w:.2f}" for n, w in zip(opp_names, opp_p if opps else [])),
           flush=True)
