@@ -108,22 +108,35 @@ What is and is not done against the spec in NIGHT_OBJECTIVES.md:
 | **56-bit parent→child memory code after a split** ("the most important thing") | `train/memcodec.py` trains standalone; **still wired to nothing** — but the message path it needs is now verified, so it is unblocked |
 | phase 2: inline-head messaging, one-way-street sharing | not started (you marked it low priority) |
 
-Two things still stand between "the rules are exact" and "a policy uses sonar":
+**Both ends are now wired, and the deployment path is verified end to end:**
 
-* **`train.py` never enables sonar.** There is no `--sonar` flag and no
-  `set_sonar` call, so a PPO run today trains with sonar entirely off and the five
-  echo scalars are constant zero. That is *consistent* — just not the upgrade.
-  `bc_vec.hpp` has `set_sonar` and the env exposes it; only the flag is missing.
-* **`mybot` prints no `PROTOCOL` line**, so it speaks legacy sonar. Adopting
-  protocol 3 moves the block it parses and needs a `check_bot.sh` pass.
+    cd bcsim && python -m train.train --sonar --reward v8      # trains on echoes
+    python -m train.export_cpp --ckpt <ck> --header ../mybot/weights_data.hpp
+    wasmprobe/check_bot.sh <ck>                                # ALL CHECKS PASSED
+
+* `train.py --sonar` broadcasts in all four directions every turn and feeds the
+  five echo counts to the policy (scalars 708-712). The flag is recorded in the
+  checkpoint's `args`, and `eval.py`/`yardstick.py` default to `--sonar auto`,
+  taking it from the checkpoint so a sonar policy is never evaluated on zeros.
+* `mybot` speaks protocol 3 — `PROTOCOL 3` plus four `SONAR <dir> 0` lines joined
+  to the single write it already makes (0.51M points, 0.6% of the cap) — **but only
+  when the embedded net is 713-scalar.** A 708-scalar net keeps byte-identical
+  legacy behaviour, because broadcasting would make `num_msgs` non-zero for a net
+  that only ever saw zero there.
+* `parity_obs.py` now checks BOTH block formats (with and without the `ECHOES`
+  line, which shifts every offset after it): 754 turns, 0 differ.
+
+Before launching, know this: sonar is symmetric, so every dragon in the env
+broadcasts and the **frozen league opponents also see a non-zero `num_msgs`** they
+were never trained on. A league measured with sonar on is therefore not strictly
+comparable with the existing numbers; if the scores jump, suspect that before
+believing it is skill.
 
 ## Still open
 
 * the counterfactual baseline (above) — the only piece that might need real work
 * pyramid deployment: `export_cpp.py` arch dispatch, a second conv trunk in
   `mybot/net.hpp`, wide planes from `mybot/memory.hpp`, new wasmprobe parity
-* `mybot` speaks legacy sonar (prints no `PROTOCOL`); adopting protocol 3 moves
-  the block it parses and needs a `check_bot.sh` pass
 * a pre-existing split-child **facing** mismatch on 2 generated maps
   (`tests/stress.py`); not sonar, present before this work — see KNOWN_ISSUES.md #5
 * real truncated BPTT for the ConvLSTM; the current result is a one-step floor

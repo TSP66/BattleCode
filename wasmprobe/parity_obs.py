@@ -37,9 +37,14 @@ def block(env) -> str:
     return buf.raw[:n].decode()
 
 
-def follow(text: str, seed: int, turns: int):
+def follow(text: str, seed: int, turns: int, sonar: bool = True):
     m = augment.parse(text)
-    env = bcsim.BattlecodeVecEnv([text], num_envs=1, num_threads=1, seed=seed)
+    # Sonar ON by default: the bot declares PROTOCOL 3 and reads the ECHOES line
+    # every turn, so the blocks it is fed here have to carry one. With sonar off
+    # the simulator never casts, the line is absent, and both sides report zero
+    # echoes -- the check would pass while testing nothing.
+    env = bcsim.BattlecodeVecEnv([text], num_envs=1, num_threads=1, seed=seed,
+                                 sonar=sonar)
     obs = env.reset()
     me = int(obs.dragon_id[0])
     team = "AB"[int(obs.team[0])]
@@ -69,12 +74,21 @@ def main() -> None:
     maps_dir = sys.argv[2] if len(sys.argv) > 2 else str(ROOT / "maps")
     turns = int(sys.argv[3]) if len(sys.argv) > 3 else 80
     total = bad_turns = 0
-    for f in sorted(pathlib.Path(maps_dir).glob("*.map")):
-        for seed in (1, 2):
-            transcript, want = follow(f.read_text(), seed, turns)
+    # Both block formats, because the bot has to parse both: with sonar the
+    # ECHOES line sits between the messages and the 49 tile lines and shifts
+    # every offset after it, and without it the line is absent entirely. A bot
+    # that handles only one of the two silently mis-parses whole blocks.
+    for sonar in (True, False):
+        print(f"-- blocks {'with' if sonar else 'without'} ECHOES (sonar "
+              f"{'on' if sonar else 'off'})")
+        for f in sorted(pathlib.Path(maps_dir).glob("*.map")):
+          for seed in (1, 2):
+            transcript, want = follow(f.read_text(), seed, turns, sonar)
             res = subprocess.run([bot], input=transcript.encode(), capture_output=True, timeout=120)
             if DUMP_DIR:
-                (pathlib.Path(DUMP_DIR) / f"{f.stem}_{seed}.txt").write_bytes(res.stderr)
+                tag = "sonar" if sonar else "legacy"
+                (pathlib.Path(DUMP_DIR) /
+                 f"{f.stem}_{seed}_{tag}.txt").write_bytes(res.stderr)
             rows = [np.array(l.split()[1:], np.float64)
                     for l in res.stderr.decode().splitlines() if l.startswith("DUMP")]
             n = min(len(rows), len(want))

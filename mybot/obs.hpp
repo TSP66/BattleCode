@@ -24,6 +24,13 @@ constexpr int CELLS = WINDOW * WINDOW;
 constexpr int N_CHANNELS = 23;
 constexpr int N_SCALARS = 14;
 constexpr int MAX_MSGS = 4;
+// The five protocol-3 echo counts (bc_core.hpp SonarEcho order: kelp, ally,
+// ally_head, enemy, enemy_head). They sit at the very END of the scalar row,
+// after the 694 remembered features, so [0, 708) stays byte for byte the row
+// every earlier checkpoint was trained on. SONAR_DIRS is what the simulator
+// divides them by, so a broadcast in all four directions maps onto [0, 1].
+constexpr int N_ECHO = 5;
+constexpr int SONAR_DIRS = 4;
 
 constexpr int N_MOVES = 3 + 9 + 27;
 constexpr int N_SPLITS = 9;
@@ -247,6 +254,18 @@ inline void Snapshot::scalars(unswbc::Controller const& ct, unswbc::Game const& 
     auto const n = ct.sonar_messages.size();
     s[12] = (float)(n < MAX_MSGS ? n : MAX_MSGS);
     s[13] = ct.get_team().value == unswbc::Team::B ? 1.0f : 0.0f;
+}
+
+// The five echo counts, normalised exactly as bc_obs.hpp does:
+//     sc[SC_ECHO_AT + k] = echo[k] / SONAR_DIRS
+// Written at the end of the row, so `out` is scalars + N_SCALARS + N_EXTRA.
+// Absent on a dragon's very first block, because it has not declared protocol 3
+// yet; the helper leaves the counts zero then, which is what the simulator has
+// at a dragon's first turn too.
+inline void echo_scalars(unswbc::Controller const& ct, float* out) {
+    unswbc::SonarEchoes const e = ct.get_sonar_echoes();
+    int const counts[N_ECHO] = {e.kelp, e.ally, e.ally_head, e.enemy, e.enemy_head};
+    for (int k = 0; k < N_ECHO; k++) out[k] = (float)counts[k] / (float)SONAR_DIRS;
 }
 
 // Legality as far as the dragon can tell, a port of VecEnv::fill_mask. A

@@ -177,6 +177,14 @@ def parse() -> argparse.Namespace:
                    help="reward v8 only: shaping strength against the terminal result. "
                         "The one knob -- it rescales every term at once and cannot "
                         "change the mix, so it is the first thing to sweep")
+    p.add_argument("--sonar", action="store_true",
+                   help="broadcast a sonar in all four directions every turn and feed "
+                        "the five echo counts to the policy (scalars 708-712, zero "
+                        "without this). Sonar is sensing, not an action: it costs no "
+                        "turn and 0.51M judge points, and the simulator is "
+                        "byte-identical to the engine (SONAR.md). It changes what the "
+                        "OPPONENT sees too, through num_msgs, so a league built "
+                        "without it is not strictly comparable")
     p.add_argument("--ent", type=float, default=0.01, help="entropy bonus at the start")
     p.add_argument("--ent-end", type=float, default=0.003, help="floor it decays toward")
     # v2 halved every 500M and its entropy had collapsed (~0.32) by 500M turns
@@ -236,7 +244,8 @@ def main() -> None:
         texts, map_w, names, areas = augment.build_pool(a.maps, a.aug_per_map, seed,
                                                         a.size_alpha, a.aug_original_share)
         e = bcsim.BattlecodeVecEnv(texts, num_envs=a.envs, num_threads=a.threads,
-                                   seed=seed, closure_capacity=max(8192, a.envs * 160))
+                                   seed=seed, closure_capacity=max(8192, a.envs * 160),
+                                   sonar=a.sonar)
         e.set_map_weights(map_w)
         if POTENTIAL_DISCOUNT[a.reward]:
             e.set_potential_gamma(a.gamma)

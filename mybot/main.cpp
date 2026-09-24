@@ -240,7 +240,35 @@ void emit(int action, obs::Snapshot const& snap) {
     out += '\n';
 }
 
+// Sonar is sensing, not an action: it does not consume the turn, and because
+// these lines join the one write the bot already makes they cost 0.51M points a
+// turn in total -- 0.6% of the cap, measured with wasmprobe/meter_bot.sh.
+//
+// Broadcast in all four directions with a zero payload, which is exactly what
+// the training environment casts (bc_vec.hpp), so the five echo counts the
+// policy reads here are the ones it was trained on. The payload stays 0 until
+// the memory codec is wired up; 0 also fits 32 bits, so it is never dropped for
+// a receiver still on the legacy protocol.
+//
+// PROTOCOL must be declared every turn, not once: without it the engine keeps
+// this dragon on the legacy protocol and sends no ECHOES line at all.
+// Only a net trained with sonar broadcasts. This matters: our own rays land on
+// our own dragons, so broadcasting makes num_msgs (scalar 12) non-zero, and a
+// net trained without sonar saw that column as always zero. Switching it on
+// under such a net would feed it an input it has never seen for no benefit, so
+// a 14- or 708-scalar checkpoint keeps the exact legacy behaviour -- no
+// PROTOCOL line, no SONAR lines, no ECHOES in the blocks it is sent.
+constexpr bool USE_SONAR = embedded::SCALARS == memory::N_SCALARS_IN;
+
 void flush_turn() {
+    if (USE_SONAR) {
+        for (char d : {'N', 'E', 'S', 'W'}) {
+            out += "SONAR ";
+            out += d;
+            out += " 0\n";
+        }
+        out += "PROTOCOL 3\n";
+    }
     out += "ENDTURN\n";
     std::fwrite(out.data(), 1, out.size(), stdout);
     std::fflush(stdout);
@@ -292,6 +320,7 @@ int main() {
         MEM.observe(snap, game.round_num);
         snap.scalars(ct, game, scalars);
         MEM.features(snap, game.round_num, scalars + obs::N_SCALARS);
+        obs::echo_scalars(ct, scalars + obs::N_SCALARS + memory::N_EXTRA);
         std::int64_t const t_obs = points_now() - start;
 
         int action = -1;

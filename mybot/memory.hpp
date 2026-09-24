@@ -41,7 +41,11 @@ constexpr int N_MEM = 4 * CELLS;                // 676
 constexpr int K = 3;                            // the nearest expected pearls memfar names
 constexpr int N_FAR = 4 * K + 6;                // 18
 constexpr int N_EXTRA = N_MEM + N_FAR;          // 694
-constexpr int N_SCALARS_IN = obs::N_SCALARS + N_EXTRA;   // 708, the net's scalar input
+// 713: the 14 base scalars, the 694 remembered features, then the 5 sonar echo
+// counts. This is the WIDEST row the bot can feed; net::load_embedded accepts any
+// checkpoint whose own scalar count is <= this, so a 14-, 708- or 713-wide net all
+// load and read only their own prefix.
+constexpr int N_SCALARS_IN = obs::N_SCALARS + N_EXTRA + obs::N_ECHO;   // 713
 
 constexpr int NEVER = -10'000;                  // "not seen", as the builders write it
 // 255 * exp(-age/32) and 255 * exp(-age/16) round to zero past these

@@ -33,6 +33,11 @@ from train.clone_features import MemoryTracker      # noqa: E402
 # and memfar to it, so using that here would make `extra` come out zero.
 C, S, A = bcsim.N_CHANNELS, len(bcsim.SCALARS), bcsim.N_ACTIONS
 N_MEM, N_FAR = 4 * 13 * 13, 18
+# The bot appends the 5 sonar echo counts after the remembered features, so the
+# dump's trailing block is 694 or 699 wide. The echoes come straight off the
+# ECHOES line and are checked by parity_obs.py against the simulator; this file
+# only owns mem and memfar, so it slices them by width rather than "the rest".
+N_ECHO = 5
 TOL = 1e-6          # both sides are float32 of the same arithmetic
 
 
@@ -49,8 +54,9 @@ def main() -> None:
         if not rows:
             continue
         extra = len(rows[0]) - (2 + C * 49 + S + 2 * A)
-        if extra != N_MEM + N_FAR:
-            print(f"{pathlib.Path(path).name}: {extra} extra scalars, expected {N_MEM + N_FAR}")
+        if extra not in (N_MEM + N_FAR, N_MEM + N_FAR + N_ECHO):
+            print(f"{pathlib.Path(path).name}: {extra} extra scalars, expected "
+                  f"{N_MEM + N_FAR} or {N_MEM + N_FAR + N_ECHO} (with sonar echoes)")
             sys.exit(1)
         # one tracker per file: a dump file is one dragon, and its memory starts
         # empty exactly as a fresh dragon's process does
@@ -63,7 +69,8 @@ def main() -> None:
             rnd = np.rint(sc[:, 0] * 500).astype(np.int64)
             want = tracker.step([0], loc, sc, rnd)
             for name, ref, mine in (("mem", want["mem"][0], got[:N_MEM]),
-                                    ("memfar", want["memfar"][0], got[N_MEM:])):
+                                    ("memfar", want["memfar"][0],
+                                     got[N_MEM:N_MEM + N_FAR])):
                 err = float(np.abs(ref - mine).max())
                 worst[name] = max(worst[name], err)
                 if err > TOL:

@@ -135,12 +135,23 @@ def main() -> None:
     p.add_argument("--steps", type=int, default=3000)
     p.add_argument("--greedy", action="store_true")
     p.add_argument("--baseline", action="store_true", help="also run a random legal policy")
+    p.add_argument("--sonar", choices=["auto", "on", "off"], default="auto",
+                   help="auto takes it from the checkpoint's own --sonar, which is the "
+                        "right default: a policy trained with sonar reads the five echo "
+                        "scalars, and evaluating it without sonar feeds it zeros it has "
+                        "never seen")
     args = p.parse_args()
 
     dev = torch.device("cuda")
     ck = torch.load(args.ckpt, map_location=dev, weights_only=False)
     a = ck["args"]
-    net = ActorCritic(bcsim.N_CHANNELS, bcsim.N_SCALARS, bcsim.N_ACTIONS,
+    # The scalar width comes from the checkpoint, never from the env: the env's
+    # row grows as features are appended (708 -> 713 with the sonar echoes) and an
+    # older net has to go on reading exactly the columns it was trained on.
+    # ActorCritic.forward slices scalar[..., :n_scalars], so the wider row is fine.
+    n_scalars = next(v for k, v in ck["net"].items()
+                     if k.endswith("scalar.0.weight")).shape[1]
+    net = ActorCritic(bcsim.N_CHANNELS, n_scalars, bcsim.N_ACTIONS,
                       width=a["width"], blocks=a["blocks"],
                       hidden=next(v for k, v in ck["net"].items() if k.endswith("fuse.0.weight")).shape[0]).to(dev)
     state = {k.replace("_orig_mod.", ""): v for k, v in ck["net"].items()}
@@ -150,8 +161,12 @@ def main() -> None:
           f"{'greedy' if args.greedy else 'sampled'}")
 
     maps = bcsim.load_maps(args.maps)
+    sonar = a.get("sonar", False) if args.sonar == "auto" else args.sonar == "on"
+    print(f"sonar {'on' if sonar else 'off'}"
+          + (" (from the checkpoint)" if args.sonar == "auto" else " (forced)"))
     env = bcsim.BattlecodeVecEnv(maps, num_envs=args.envs, num_threads=16, seed=7,
-                                 closure_capacity=max(8192, args.envs * 160))
+                                 closure_capacity=max(8192, args.envs * 160),
+                                 sonar=sonar)
 
     def learned(obs):
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
@@ -180,7 +195,8 @@ def main() -> None:
             return (c < r[:, None]).sum(1).astype(np.int32)
 
         env2 = bcsim.BattlecodeVecEnv(maps, num_envs=args.envs, num_threads=16, seed=7,
-                                      closure_capacity=max(8192, args.envs * 160))
+                                      closure_capacity=max(8192, args.envs * 160),
+                                      sonar=sonar)
         report("random legal", run(random_legal, env2, args.steps), maps)
 
 

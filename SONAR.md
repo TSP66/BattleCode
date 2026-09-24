@@ -113,9 +113,15 @@ asks **on every turn**, immediately before `ENDTURN`:
     ENDTURN
 
 Not a one-time handshake. Without it: no `ECHOES` line, and `SONAR <uint64>`
-capped at 32 bits. **`mybot/` does not print `PROTOCOL` at all**, so everything
-submitted so far has run as legacy. Adopting protocol 3 moves the block our
-`obs.hpp` parses — see SUBMITTING.md before changing it.
+capped at 32 bits.
+
+**`mybot/` now speaks protocol 3, but only when the embedded net was trained with
+sonar** (`embedded::SCALARS == 713`). A 14- or 708-scalar checkpoint keeps the
+exact legacy behaviour — no `PROTOCOL`, no `SONAR`, no `ECHOES` in the blocks it
+is sent. That gate matters: our own rays land on our own dragons, so broadcasting
+makes `num_msgs` (scalar 12) non-zero, and a net trained without sonar saw that
+column as always zero. Verified by emitting against a transcript: the 713 net
+prints 4 `SONAR` lines plus `PROTOCOL 3` every turn, the 708 net prints neither.
 
 ### Sending
 

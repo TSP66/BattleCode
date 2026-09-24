@@ -138,7 +138,8 @@ def _call(fn, obs, rows, wide=None):
 
 def evaluate(learner, opponents: list[dict], maps: list[str], map_names: list[str],
              games: int = 16, threads: int = 8, seed: int = 12345,
-             max_seconds: float = 900.0, progress: float = 0.0) -> dict:
+             max_seconds: float = 900.0, progress: float = 0.0,
+             sonar: bool = False) -> dict:
     """Plays `games` per (opponent, map) cell, half on each side.
 
     opponents: {"name", "bot": index} for a scripted bot, or {"name", "act":
@@ -154,8 +155,15 @@ def evaluate(learner, opponents: list[dict], maps: list[str], map_names: list[st
     n = len(layout)
     any_wide = any(getattr(f, "wants_wide", False)
                    for f in [learner] + [o.get("act") for o in opponents] if f is not None)
+    # sonar has to match what the learner was trained with, or its five echo
+    # scalars arrive as zeros it has never seen. It is symmetric -- every dragon
+    # in the env broadcasts -- so the frozen opponents also see a non-zero
+    # num_msgs, which is why a league measured with sonar on is not directly
+    # comparable with one measured without it.
+    print(f"  sonar {'on' if sonar else 'off'}", flush=True)
     env = bcsim.BattlecodeVecEnv(maps, num_envs=n, num_threads=threads, seed=seed,
-                                 closure_capacity=max(8192, n * 160), wide=any_wide)
+                                 closure_capacity=max(8192, n * 160), wide=any_wide,
+                                 sonar=sonar)
     learner_team = np.array([side for _, _, side in layout], np.int8)
     opp_of = np.array([o for o, _, _ in layout])
     for i, (o, mi, side) in enumerate(layout):
@@ -320,6 +328,8 @@ def main() -> None:
     # deliberately light: a noisy number every so often is all it is for
     p.add_argument("--games", type=int, default=4, help="per (opponent, map) cell")
     p.add_argument("--threads", type=int, default=4)
+    p.add_argument("--sonar", choices=["auto", "on", "off"], default="auto",
+                   help="auto takes it from each checkpoint's own --sonar")
     p.add_argument("--every-minutes", type=float, default=15.0,
                    help="start an evaluation of the newest snapshot this often")
     p.add_argument("--lags", default="50e6,200e6",
@@ -368,7 +378,9 @@ def main() -> None:
         for name, pp, onet in nets:
             opps.append({"name": name, "act": greedy(onet, dev), "path": str(pp)})
         res = evaluate(greedy(net, dev), opps, maps, map_names, games=a.games,
-                       threads=a.threads, max_seconds=a.max_seconds)
+                       threads=a.threads, max_seconds=a.max_seconds,
+                       sonar=ck.get("args", {}).get("sonar", False)
+                       if a.sonar == "auto" else a.sonar == "on")
         row = {"total_turns": turns, "iter": ck.get("iter"), "ckpt": str(path),
                "time": time.time(), "opponents": {o["name"]: o.get("path", "") for o in opps},
                **res}

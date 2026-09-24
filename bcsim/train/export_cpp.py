@@ -88,7 +88,7 @@ def write_header(dest: pathlib.Path, u: np.ndarray, width: int, blocks: int, hid
         f"constexpr int BLOCKS = {blocks};\n"
         f"constexpr int HIDDEN = {hidden};\n"
         f"constexpr int HEAD = {head};\n"
-        f"constexpr int SCALARS = {scalars};   // 14, or 708 with the remembered inputs\n"
+        f"constexpr int SCALARS = {scalars};   // 14, 708 with the remembered inputs, 713 with sonar echoes\n"
         f"constexpr std::uint32_t COUNT = {u.size}u;       // bf16 values\n"
         f"constexpr std::uint32_t CHECKSUM = {checksum(u)}u;   // FNV-1a over them\n"
         f'constexpr char const SOURCE[] = "{source}";\n\n'

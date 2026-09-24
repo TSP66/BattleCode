@@ -23,6 +23,7 @@ struct Constants {
     static constexpr int VISION_SIZE = 2 * VISION_RADIUS + 1;
     static constexpr int INITIAL_LENGTH = 3;
     static constexpr int MIN_SIZE = 2;
+    static constexpr int PROTOCOL_MAJOR = 3;
 };
 
 class Direction {
@@ -262,6 +263,15 @@ class Vision {
     }
 };
 
+// The five counts of the protocol-3 ECHOES line, in its order.
+struct SonarEchoes {
+    int kelp = 0;
+    int ally = 0;
+    int ally_head = 0;
+    int enemy = 0;
+    int enemy_head = 0;
+};
+
 class Controller {
   public:
     int length = Constants::INITIAL_LENGTH;
@@ -269,10 +279,15 @@ class Controller {
     int unit_limit;
     DragonPart head;
     Vision vision;
-    std::vector<std::uint32_t> sonar_messages;
+    // Protocol 3 carries the whole 64-bit word; the legacy form capped it at 32
+    // bits. A payload above UINT32_MAX is DROPPED for a receiver still on the
+    // legacy protocol rather than truncated, so both ends must declare 3 for a
+    // wide message to land (SONAR.md).
+    std::vector<std::uint64_t> sonar_messages;
+    SonarEchoes sonar_echoes;
 
     Controller(int dragon_id, Team team, Direction direction, Vision vision, int unit_limit,
-               std::vector<std::uint32_t> sonar_messages = {})
+               std::vector<std::uint64_t> sonar_messages = {})
         : unit_limit(unit_limit), head(Position(0, 0), dragon_id, team, direction, true),
           vision(std::move(vision)), sonar_messages(std::move(sonar_messages)) {}
 
@@ -321,7 +336,15 @@ class Controller {
     void set_indicator_string(std::string_view message) {
         std::cout << "INDICATOR " << message << "\n";
     }
-    std::vector<std::uint32_t> get_sonar_messages() const { return sonar_messages; }
+    std::vector<std::uint64_t> get_sonar_messages() const { return sonar_messages; }
+    // What this dragon's own sonars hit last turn, one count per category. The
+    // five sum to the number of rays sent, so each ray stops on exactly one
+    // thing; there is no bearing, so four rays give a histogram of the
+    // surroundings and one ray gives a clean reading in that direction.
+    SonarEchoes get_sonar_echoes() const { return sonar_echoes; }
+    void send_sonar(Direction direction, std::uint64_t message) {
+        std::cout << "SONAR " << static_cast<char>(direction.value) << " " << message << "\n";
+    }
     bool send_sonar(std::uint64_t message) {
         if (message > UINT32_MAX)
             return false;
@@ -445,14 +468,30 @@ inline bool update(Controller& controller, Game& game_state) {
         auto const line = parse_util::read_data_line();
         if (line.size() != 1)
             throw std::runtime_error("missing sonar message value");
-        controller.sonar_messages.push_back(parse_util::parse_integer<std::uint32_t>(line.front()));
+        controller.sonar_messages.push_back(parse_util::parse_integer<std::uint64_t>(line.front()));
+    }
+
+    // Protocol 3 puts ECHOES between the messages and the 49 tile lines, so it
+    // shifts every offset after it. It is absent until this dragon has declared
+    // protocol 3 -- which is once per turn, so only its very first block lacks
+    // it. Peek one line and only consume it as a tile if it is not ECHOES.
+    auto first_tile_values = parse_util::read_data_line();
+    controller.sonar_echoes = {};
+    if (!first_tile_values.empty() && first_tile_values.front() == "ECHOES") {
+        if (first_tile_values.size() != 6)
+            throw std::runtime_error("ECHOES requires 5 values");
+        auto const echo = [&](std::size_t index) {
+            return parse_util::parse_integer<int>(first_tile_values[index]);
+        };
+        controller.sonar_echoes = {echo(1), echo(2), echo(3), echo(4), echo(5)};
+        first_tile_values = parse_util::read_data_line();
     }
 
     std::vector<Tile> tiles;
     std::unordered_map<Position, std::size_t, PositionHash> tile_indices;
     tiles.reserve(Constants::VISION_SIZE * Constants::VISION_SIZE);
     for (int index = 0; index < Constants::VISION_SIZE * Constants::VISION_SIZE; index++) {
-        auto const values = parse_util::read_data_line();
+        auto const values = index == 0 ? first_tile_values : parse_util::read_data_line();
         if (values.size() != 4)
             throw std::runtime_error("each vision tile requires: x y hasPearl pearlIn");
 
