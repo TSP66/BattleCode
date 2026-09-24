@@ -65,8 +65,8 @@ Measured over 153,532 turns of random play (tests/test_memfeat.py):
 
     a child hears a packet                           77.8% of turns
     a child born knowing no pearl at all             14.1%
-      ... of those, given one by the pearl slots      2.5%
-    a child knowing a pearl it cannot see       0.0% -> 0.2%
+      ... of those, given one by the pearl slots      1.5%
+    a child knowing a pearl it cannot see       0.0% -> 0.0%
 
 So delivery to children is not the problem. The problem is that a parent is
 ADJACENT to the child it just made, so the parent's three nearest pearls are
@@ -78,17 +78,24 @@ a child lacks is not a nearby pearl, it is everything further out.
 The cones are exactly that: a weighted density over the sender's WHOLE
 remembered map, which a blank-memory child has no way to build. With them:
 
-    a cone weight rose        64.3% of children's first turns (39.6% of all turns)
-    total cone weight, child  1.473 -> 2.782     nearly doubled
-    total cone weight, any    1.006 -> 1.259
+    a cone weight rose        64.0% of children's first turns (34.3% of all turns)
+    total cone weight, child  1.473 -> 2.411     up 64%
+    total cone weight, any    1.006 -> 1.118
+
+A packet states only what its sender has itself observed, never what it was told;
+`MemChannel.receive` says why, and what that costs.
 
 (The other case, a dragon that knows no pearl anywhere, is delivery-bound and
-nothing in the payload can fix it: such a dragon heard a pearl on only 7.8% of
+nothing in the payload can fix it: such a dragon heard a pearl on only 5.3% of
 its blind turns, and on 100% of those it was given one. It is alone, and a sonar
 ray stops at the first dragon it meets, so no one is in range to tell it
-anything. Those figures are from random play, where dragons stay short; a ray is
+anything.)
+
+Every figure above is from RANDOM play, where dragons stay short. A ray is
 dragged the length of a body before it flies, so a trained policy's longer
-dragons reach further and should do better.)
+dragons reach much further, and they do: over a real PPO iteration the channel
+merges 0.77 pearls a turn against 0.19, is heard on 63% of turns against 49%,
+and lifts a cone on 55% against 34%.
 
 WHAT IT DOES NOT DO
 -------------------
@@ -123,7 +130,12 @@ PEARL_SLOTS = 3
 SLOT_BITS = 13                      # valid(1) | x(6) | y(6)
 SLOT0_SHIFT = 42                    # slot j occupies [SLOT0_SHIFT - 13j + 12 : ...]
 COORD_BITS = 6
-COORD_MAX = 1 << COORD_BITS         # boards are at most 64 x 64
+# Boards are at most 64 x 64 (cpp/bc_memory.hpp), so six bits address every cell
+# exactly. Checked against the real pools rather than the comment: over 686 maps
+# from `maps` and 392 from runs/ft3/maps, 77 and 57 distinct sizes, the largest is
+# 64x64 and none is over. A cell that did not fit would be dropped from the packet
+# rather than sent wrong, so a bigger board would lose sharing, not break.
+COORD_MAX = 1 << COORD_BITS
 
 N_CONES = 4
 CONE_BITS = 3
@@ -413,8 +425,8 @@ class MemChannel:
     """Both ends of the channel, for one vec env.
 
     Per step: `receive` before the observation is used, so the policy sees the
-    team's pearls; then `send`, whose payload is built from the MERGED block, so
-    a dragon relays what it was told and knowledge spreads past one hop.
+    team's pearls; then `send`, which hands over the packet `receive` built from
+    the dragon's own knowledge before it merged anything (see `receive`).
 
     Every dragon is put on protocol 3 and broadcasts in all four directions. The
     protocol is not optional: the engine DROPS a payload above 2^32 addressed to
@@ -429,27 +441,62 @@ class MemChannel:
     ALL_DIRS = 0b1111
 
     def __init__(self, num_envs: int, n_dirs: int = 4, max_read: int = MAX_READ,
-                 cross_team: bool = False, cones: bool = True):
+                 cross_team: bool = False, cones: bool = True,
+                 relay: bool = False):
         self.num_envs = num_envs
         self.max_read = max_read
         self.cross_team = cross_team
         self.cones = cones
+        self.relay = relay
         self._send = np.full(num_envs, self.ALL_DIRS, np.uint8)
         self._proto = np.full(num_envs, 3, np.int8)
         self._sonar = np.zeros((num_envs, n_dirs), np.uint64)
         self.stats = {"heard": 0, "added": 0, "lifted": 0, "with_pearl": 0, "rows": 0}
 
     def receive(self, obs) -> dict:
-        """Merges the inbox into obs.scalar in place and accumulates counters."""
+        """Builds this dragon's outgoing packet, then merges its inbox in place.
+
+        In that order, which is the whole point: **a packet states only what its
+        sender has itself observed**, never what it was told. Relaying looks free
+        and is not:
+
+          * a cone is measured from the SENDER'S position -- "pearls lie north of
+            me" is not "pearls lie north of you". One hop is honest, because a
+            ray stops at the first dragon it meets (so a sender is somebody's
+            nearest neighbour) and a parent is adjacent to its child. Taking a
+            maximum over relayed cones compounds that error until every dragon
+            claims pearls in every direction;
+          * a relayed pearl cell never expires. The dragon that saw it drops it
+            once it looks again and finds the cell empty, but a copy circulating
+            in someone else's slots is re-sent forever by dragons that have never
+            been there.
+
+        So knowledge spreads one hop per turn rather than propagating, and every
+        field in flight is traceable to a dragon that actually observed it.
+
+        It is not free. Relaying carried about twice the raw volume (pearls merged
+        per turn 0.19 against 0.09, blind turns rescued 7.8% against 5.3%, a
+        child's cone weight 2.782 against 2.411 from a base of 1.473), so
+        `relay=True` is left available to measure against -- but half of what it
+        carried was a cone measured from the wrong place or a pearl nobody had
+        looked at in a hundred turns.
+        """
+        if not self.relay:
+            self._sonar[:] = encode(obs.scalar)[:, None]
         st = merge(obs.scalar, obs.msgs, obs.num_msgs, self.max_read, self.cross_team,
                    self.cones)
+        if self.relay:
+            self._sonar[:] = encode(obs.scalar)[:, None]
         for key, v in st.items():
             self.stats[key] += v
         return st
 
-    def send(self, obs):
-        """(send_dirs, sonar, protocol) to hand to env.step."""
-        self._sonar[:] = encode(obs.scalar)[:, None]
+    def send(self, obs=None):
+        """(send_dirs, sonar, protocol) to hand to env.step.
+
+        The payload was built by `receive` this turn, before the merge. `obs` is
+        accepted so the call reads like the pair it is, and is not used.
+        """
         return self._send, self._sonar, self._proto
 
     def rates(self) -> dict:
