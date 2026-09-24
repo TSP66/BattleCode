@@ -150,6 +150,10 @@ def main() -> None:
         done0 = int(ck.get("cand_turns", 0))
     del ck
     teacher = frozen(a.teacher, dev)
+    if getattr(teacher, "wants_wide", False) and not policy.wants_wide:
+        raise SystemExit("the KL teacher reads the remembered-map planes but the policy "
+                         "does not, so the planes are never stored: give both the same "
+                         "architecture")
     opp_paths = [x for x in a.opponents.split(",") if x]
     opp_names = [x for x in a.opp_names.split(",") if x] or [pathlib.Path(x).stem for x in opp_paths]
     opps = [frozen(x, dev) for x in opp_paths]
@@ -285,7 +289,10 @@ def main() -> None:
                 for k, onet in enumerate(opps):
                     rows = torch.from_numpy(~learn & (slot == k + 1)).to(dev)
                     if rows.any():
-                        ol, _ = onet(staged[0][rows], staged[1][rows])
+                        # a league member may be a pyramid, which reads the
+                        # remembered-map planes and raises without them
+                        ow = w_now[rows] if getattr(onet, "wants_wide", False) else None
+                        ol, _ = onet(staged[0][rows], staged[1][rows], ow)
                         ol = masked_logits(ol.float(), staged[2][rows])
                         action[rows] = torch.multinomial(ol.softmax(1), 1).squeeze(1)
             roll.record(t, staged, obs, action, logp, zero_v, learn=learn)
@@ -397,8 +404,11 @@ def main() -> None:
             ix = perm[s:s + a.minibatch]
             lb, sb, mask_b = b_local[ix].float(), b_scalar[ix].float(), b_mask[ix]
             wb = b_wide[ix].float() if b_wide is not None else None
+            tw = wb if getattr(teacher, "wants_wide", False) else None
             with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-                t_logits, _ = teacher(lb, sb)
+                # the KL teacher is the anchor this segment started from, so with a
+                # pyramid policy the teacher is a pyramid too and needs the planes
+                t_logits, _ = teacher(lb, sb, tw)
             t_logp = torch.log_softmax(masked_logits(t_logits.float(), mask_b), dim=1)
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 logits, _ = policy(lb, sb, wb)

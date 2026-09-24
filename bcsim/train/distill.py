@@ -32,6 +32,7 @@ import torch.nn.functional as F
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 import bcsim                                    # noqa: E402
+from train import memfeat                        # noqa: E402
 from train import net as net_mod                  # noqa: E402
 from train.net import ActorCritic, PyramidActorCritic, masked_logits  # noqa: E402
 from train.student import Student                 # noqa: E402
@@ -64,6 +65,11 @@ def parse() -> argparse.Namespace:
     p.add_argument("--minibatch", type=int, default=8192)
     p.add_argument("--iters", type=int, default=400)
     p.add_argument("--temp", type=float, default=1.0)
+    p.add_argument("--memchan", action="store_true",
+                   help="distil with the team's shared map on (train/memfeat.py). Match "
+                        "this to the PPO run that follows: the channel rewrites memfar, "
+                        "and a student cloned on the unmerged row starts PPO reading a "
+                        "feature whose distribution has shifted under it")
     return p.parse_args()
 
 
@@ -238,6 +244,10 @@ def main() -> None:
     env = bcsim.BattlecodeVecEnv(bcsim.load_maps(a.maps), num_envs=a.envs,
                                  num_threads=a.threads, seed=11,
                                  closure_capacity=max(8192, a.envs * 160), wide=pyr)
+    chan = memfeat.MemChannel(a.envs) if a.memchan else None
+    if chan is not None:
+        print("shared-map channel on: the student is cloned on the merged memfar row",
+              flush=True)
     obs = env.reset()
     n = a.envs
     buf_local = torch.zeros(a.steps, n, bcsim.N_CHANNELS, bcsim.WINDOW, bcsim.WINDOW,
@@ -252,6 +262,8 @@ def main() -> None:
     for it in range(a.iters):
         net.eval()
         for t in range(a.steps):
+            if chan is not None:
+                chan.receive(obs)       # before anything reads the row
             local = torch.from_numpy(obs.local).to(dev, non_blocking=True)
             scalar = torch.from_numpy(obs.scalar).to(dev, non_blocking=True)
             mask = torch.from_numpy(obs.mask).to(dev, non_blocking=True).bool()
@@ -265,7 +277,9 @@ def main() -> None:
             if pyr:
                 buf_wide[t] = torch.from_numpy(env.wide).to(dev, non_blocking=True).half()
             action = torch.multinomial(logp.exp(), 1).squeeze(1)
-            obs, _, _ = env.step(action.to(torch.int32).cpu().numpy())
+            acts = action.to(torch.int32).cpu().numpy()
+            obs, _, _ = (env.step(acts, *chan.send(obs)) if chan is not None
+                         else env.step(acts))
 
         flat = a.steps * n
         fl = buf_local.reshape(flat, bcsim.N_CHANNELS, bcsim.WINDOW, bcsim.WINDOW)
