@@ -21,8 +21,8 @@ here:
   priced by a change in team state, or it gets charged twice.
 
 v8 goes further: a **single bounded zero-sum team potential**, plus the true
-game result, plus one small non-rivalrous individual term. No per-dragon death,
-pearl or kill rewards at all.
+game result, and nothing else. No per-dragon death, pearl, kill or length
+rewards at all.
 
 ## Three design questions, answered
 
@@ -246,41 +246,43 @@ ground (pearls respawn — `MemoryTracker` already tracks the respawn timer).
 Maintain it with a ring buffer of expiries for O(1) amortised. Kept out of v8
 because cumulative coverage is one fewer knob and cannot oscillate.
 
-## Individual terms: the admissibility rule
+## No individual terms at all
 
-The constraint is not "no individual rewards" but **no dragon of ours may be
-rewarded at the expense of another of ours.** Formally, an individual term is
-admissible iff it is *non-rivalrous*: no teammate's gain may lower another
-teammate's reward.
+**There are none. Every dragon on the team receives the identical reward
+stream.** Nothing is paid for a dragon's own death, its own pearls, its own
+kills or its own length. This is a hard constraint, not a weight set to zero:
+individual rewards are what stop team behaviour emerging, and the whole point of
+v8 is that a sacrifice can pay.
 
-* **Forbidden**: any intra-team normalisation or ranking — share of team length,
-  being the longest on our own team, a per-dragon slice of coverage, anything
-  divided by a team aggregate. These make dragons compete directly and are the
-  reason to be suspicious of individual rewards in the first place.
-* **Admissible**: `own_length_delta` (a teammate growing costs me nothing),
-  `own_died`. The shared team potential Φ is non-rivalrous by construction,
-  since every teammate receives the identical delta.
+Two rules follow, for anything added later:
 
-v8 keeps exactly one individual term, `own_length_delta = 0.01`, annealed to 0
-by round 150 — a third of v3's weight, and only during the phase where the
-policy is learning to eat and not die.
+* **Never normalise or rank within the team** — share of team length, being the
+  longest on our own team, a per-dragon slice of coverage, anything divided by a
+  team aggregate. These make our dragons compete against each other directly.
+* The shared potential Φ is safe by construction: every teammate receives the
+  identical delta, so no dragon can gain at another's expense. Teammates compete
+  for **ground** (a tile another dragon covered is used up) and never for
+  **reward**. That is the only rivalry v8 permits, and it is the pressure that
+  makes them fan out.
 
-The reason it is there at all: with a pure team reward, **every dragon receives
-the identical reward stream, so there is no credit assignment within a turn.**
-A dragon's advantage is dominated by what its ~30 teammates did while it was not
-acting. The reward becomes dense in *time* but not local in *space*: a pearl that
-paid `+0.03` in v3 now pays `2/T ≈ 0.025` of a `tanh`, diluted across the team —
-call it 100× weaker. Early learning gets much slower.
+### What this costs, and where it gets paid back
 
-Honest cost: `own_length_delta` does introduce mild *behavioural* rivalry, since
-two dragons will race for the same pearl rather than being indifferent about who
-takes it. Under a pure team reward they could coordinate. That is the trade, and
-it is why the weight is small and temporary.
+With a pure team reward there is **no credit assignment within a turn.** A
+dragon's advantage is dominated by what its ~30 teammates did while it was not
+acting. The reward is dense in *time* but not local in *space*: a pearl that paid
+`+0.03` through v3's `length_delta` now pays `2/T ≈ 0.025` of a `tanh`, diluted
+across the whole team — call it 100× weaker. Expect early learning to be slower
+than v6's, and do not read that as the spec failing.
 
-The non-rivalrous way to get the same variance reduction is on the critic side —
-a counterfactual baseline `V(s, i)` conditioned on the acting dragon, so the
-advantage subtracts teammate noise (COMA/VDN). That is the principled fix and it
-is a requirement on the critic refactor, not on the reward.
+The fix belongs on the **critic**, not the reward, because a critic-side fix
+costs nothing in rivalry: a counterfactual baseline `V(s, i)` conditioned on the
+acting dragon subtracts teammate noise from the advantage while leaving every
+dragon's reward identical (COMA/VDN). Combined with the residual form below, that
+is where the variance has to come out. It is a requirement on the critic
+refactor.
+
+If early learning stalls badly, the lever is `λ_exp` and `λ_len` — the two dense
+*team* terms — not a per-dragon term.
 
 ## Hand-set weights
 
@@ -293,7 +295,6 @@ Round `t ∈ [0, 500]`, `s = t/500`.
 | `λ_top3` | `0.6 · clamp((s − 0.4)/0.6, 0, 1)` | 0 | 0 | 0.10 | 0.35 | 0.60 | "don't put all eggs in one basket" only matters once there is something to lose |
 | `λ_kill` | `0.8 (1 − s³)` | 0.80 | 0.79 | 0.70 | 0.46 | 0 | decent for most of the game, out at the end where `λ_win` says the same thing |
 | `λ_exp` | `1.0 · max(0, 1 − t/150)` | 1.00 | 0.17 | 0 | 0 | 0 | opening only |
-| `own_length_delta` | `0.01 · max(0, 1 − t/150)` | 0.010 | 0.0017 | 0 | 0 | 0 | phase-1 credit assignment |
 | `W` (terminal) | constant | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 | the only non-telescoping term |
 
 Two schedules in substance — one shaping ramp down (`λ_len`, `λ_exp`), one
@@ -381,6 +382,6 @@ them would break every saved run's log schema.
 * Whether `λ_len` and the gated `z` inside `Φ_win` double-count enough to matter.
   They are deliberately redundant — dense early, gated late — but if the policy
   over-values total length in the midgame, `λ_len` is the knob.
-* Whether `own_length_delta` is needed at all, or whether the counterfactual
-  baseline alone closes the credit-assignment gap. Testable: same run, weight
-  0.01 vs 0.
+* Whether the counterfactual baseline alone closes the credit-assignment gap.
+  There is no per-dragon reward to fall back on if it does not, so this is the
+  one place v8 could need real work rather than retuning.
