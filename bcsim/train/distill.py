@@ -198,6 +198,31 @@ def main() -> None:
     for p in teacher.parameters():
         p.requires_grad_(False)
 
+    # --memchan is only correct when the TEACHER was trained with the channel on,
+    # and the reason is a base scalar rather than anything to do with memfar.
+    #
+    # num_msgs is scalar 12, inside the 14 every architecture reads. Broadcasting
+    # four ways from every dragon takes it from 100% zeros to 78% non-zero
+    # (0:22% 1:14% 2:28% 3:15% 4:20%, measured on maps-all), while a clone of a
+    # real team was fitted where it is 0 in 89% of rows -- Sabotage-d submission
+    # 3952, 813,413 rows. So the channel drives the teacher onto an input it
+    # effectively never saw, its weight on that input is barely trained, and the
+    # distribution the student is asked to copy is partly noise.
+    #
+    # Nor is there anything to gain. A teacher that cannot see memfar cannot act
+    # on the shared map, so the merged columns are uninformative for predicting
+    # its action and the student learns to ignore them either way. Distillation
+    # cannot teach the use of a channel the teacher is blind to; only PPO can.
+    if a.memchan and not bool(ta.get("memchan", False)):
+        raise SystemExit(
+            f"--memchan with a teacher that was not trained with it ({a.teacher}).\n"
+            "Broadcasting moves num_msgs (scalar 12, which every net reads) from ~0 to\n"
+            "1-4 on most turns, and a behaviour clone never saw that, so the target you\n"
+            "would be copying is partly untrained behaviour. It buys nothing either: a\n"
+            "teacher blind to memfar cannot act on the shared map, so the student learns\n"
+            "to ignore it regardless. Distil without --memchan and let PPO learn the\n"
+            "channel, or pass a teacher from a --memchan run.")
+
     ac = a.arch == "actorcritic"
     pyr = a.arch == "pyramid"
     if a.arch == "convlstm":
