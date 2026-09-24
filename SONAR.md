@@ -221,6 +221,79 @@ Hypotheses tested and **rejected**, recorded so they are not tried again:
 message path is what the parent-to-child memory codec rides on, so the codec is
 blocked until this is fixed.
 
+## Message delivery: MEASURED, and it was not the bug
+
+`tests/probe_sonar_timing.py` sends exactly one sonar, from one dragon, in one
+direction, with a payload encoding sender and round, so every delivery is
+unambiguous. The rule:
+
+* a ray is resolved and delivered **immediately**, not at a round boundary;
+* the receiver reads it on **its own next turn**. So if the receiver sits later in
+  the sending round it reads the message that same round (lag 0, 561 of 609
+  cross-dragon deliveries on `default_small`), and if it has already acted it
+  reads it next round (lag +1).
+
+**That is exactly what our simulator already does**, so the `NUM_MSGS` difference
+at round 0 is not a timing bug. It is a targeting bug: we deliver to dragons the
+engine's ray never reaches.
+
+## Per-ray truth, and what is actually left
+
+`tests/probe_sonar_rays.py` makes every payload globally unique — (round, sender,
+direction) — so each ray can be paired with the engine's. This is the instrument
+that should have existed from the start; aggregate echo counts cannot separate a
+targeting error from a classification error.
+
+```
+big_empty      97.20% of 191,463 rays agree    (no kelp, NO PORTALS)
+    ours=other  engine=other   4318 (2.26%)   we hit a different dragon
+    ours=SELF   engine=other    599 (0.31%)
+    ours=other  engine=SELF     423 (0.22%)
+default_small  87.45% of 518 rays
+    ours=nobody engine=other     31 (5.98%)   engine reaches a dragon, we stop
+    ours=nobody engine=SELF      14 (2.70%)
+arena          69.23% of 91 rays
+```
+
+So there are **two** faults, not one:
+
+1. **On kelp maps our ray stops short** (`ours=nobody engine=other`). This is the
+   old "we say kelp, the engine says dragon" shape.
+2. **On a map with no kelp and no portals we still hit a different dragon on 2.8%
+   of rays.** This one is new information and it rules out both of the candidates
+   this file previously named as the remaining suspects.
+
+Ruled out, with the measurement, so they are not tried again:
+
+* **delivery timing** — measured above, ours already matches;
+* **`head_at[]` being stale** — replacing it with `dragons[occ].head() == tile`
+  gives byte-identical results (3,085 mismatching turns either way), so the grid
+  and the dragon agree;
+* **the direction label** — comparing deliveries while *ignoring* which direction
+  each ray was credited to does not improve agreement (89.65% of sender-turns,
+  which is the same ~2.8% per ray), so the four payloads are not permuted;
+* **own body always transparent** (variant B) — much worse, 18.2% of echo turns
+  mismatch against 6.5% for the current rule;
+* **duplicate delivery / an inbox that is not cleared** — every unique ray is
+  received exactly once on both sides, on every map;
+* **the ray's length limit** — a wrong limit would show as one side finding
+  nobody; that happens on 14 rays out of 191,463 on `big_empty`;
+* **portals** — no official map has a portal whose partner edge turns the ray, and
+  `big_empty` has **no portals at all** yet still disagrees. (`tile_after_step`
+  does not rotate the heading when a portal changes edge orientation, which would
+  be a real bug on a map that had one. None do.)
+* **the board diverging** — `parity_sonar.py` reports **0 desyncs over 48,580
+  turns**, so turn order and dragon identity match exactly.
+
+### The next step, concretely
+
+Everything cheap is exhausted. What is needed now is to **trace the ray tile by
+tile**, which means exposing the board to the probe so the first dragon along the
+line can be computed independently and compared with both answers. Until then
+"we hit a different dragon on an empty torus" has no mechanism attached to it, and
+guessing has a poor record here — four hypotheses rejected above, three before
+that.
+
 ## Still unmeasured
 
 - ~~The point cost of a `SONAR` line.~~ **Measured, and it is cheap.**
