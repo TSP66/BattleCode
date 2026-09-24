@@ -162,6 +162,33 @@ struct VecConfig {
     // untouched. The v1-v7 components keep being emitted either way.
     bool reward_v8 = false;
     bc8::Params v8;
+    // How a v8 component is attributed. INTERVAL pays each dragon the change in
+    // Phi since its OWN last turn, which telescopes per agent and is exact
+    // potential shaping. OWN pays it only the change across its own action.
+    //
+    // Measured under random play: with INTERVAL, just 3.3% of the variance in
+    // the reward a dragon receives is explained by what that dragon personally
+    // did (253,906 transitions, median 11 turns per dragon). The rest is
+    // teammates and enemies moving in between. OWN makes that 100% by
+    // construction and has lower variance too (paid std 0.0496 against 0.0745).
+    //
+    // But it is NOT the same shaping re-attributed, and an earlier version of
+    // this comment wrongly said it was. Phi is signed per team, so summing
+    // Phi(post) - Phi(pre) over both teams' turns does not telescope: whatever
+    // changes on the ENEMY's turns is paid to nobody. Measured team total over
+    // the same 4,000 steps: -364.8 under INTERVAL, -571.3 under OWN.
+    //
+    // That is a bias, not merely less noise. Under OWN the policy is never
+    // charged for the enemy growing on the enemy's turn -- only for its own
+    // moves, plus whatever a victim is charged when it dies. It also loses exact
+    // per-agent invariance and any credit for setting a teammate up, which now
+    // lands on whoever finishes and has to reach the setup through the critic.
+    //
+    // So OWN trades noise for bias, and INTERVAL stays the default. The 3.3% is
+    // a real problem, but the fix most likely belongs in the critic (a
+    // counterfactual baseline) rather than in breaking the accounting.
+    enum V8Credit { V8_INTERVAL = 0, V8_OWN = 1 };
+    int v8_credit = V8_INTERVAL;
 };
 
 // One open transition waiting to be closed with its reward.
@@ -336,9 +363,10 @@ public:
     void set_potential_gamma(float g) { cfg_.potential_gamma = g; }
     // Reward v8. kappa is the single knob for how strong the shaping is against
     // the outcome; the lambdas are shares and do not change it.
-    void set_reward_v8(bool on, float kappa) {
+    void set_reward_v8(bool on, float kappa, int credit = VecConfig::V8_INTERVAL) {
         cfg_.reward_v8 = on;
         cfg_.v8.kappa = kappa;
+        cfg_.v8_credit = credit;
     }
 
     void set_env_opponent(int env_index, int team, int bot_kind, int fixed_map) {
@@ -648,6 +676,16 @@ private:
         e.game.events.clear();
         e.events_seen = 0;
 
+        // reward v8, OWN attribution: re-bank at the PRE-action state, so the
+        // reward this turn is Phi(after my move) - Phi(before my move) and
+        // nothing that happened while I was waiting is charged to me.
+        if (cfg_.reward_v8 && cfg_.v8_credit == VecConfig::V8_OWN) {
+            AgentAcc& acc = e.agents[di];
+            bc8::potential(team_shape(e, d.team), team_shape(e, (uint8_t)(1 - d.team)),
+                           e.game.round, cfg_.max_rounds, e.map->area(), cfg_.v8, acc.v8);
+            acc.v8_primed = true;
+        }
+
         const int before_len = d.len;
         const int64_t portals_before = e.game.stats[ST_PORTAL_STEP];
         if (a.kind == 0 && a.n_steps > 0) {
@@ -764,7 +802,11 @@ private:
                                e.map ? e.map->area() : 0, cfg_.v8, now);
             }
             if (acc.v8_primed) {
-                const float g = cfg_.potential_gamma;
+                // OWN discounts nothing: a difference reward is not a potential
+                // over the agent's own chain, so there is no gamma * phi(s') to
+                // take. INTERVAL is gamma * phi(now) - phi(then).
+                const float g = cfg_.v8_credit == VecConfig::V8_OWN
+                                    ? 1.0f : cfg_.potential_gamma;
                 for (int k = 0; k < bc8::N_TERMS; k++)
                     acc.comps[RW_V8_WIN + k] += g * now[k] - acc.v8[k];
             }

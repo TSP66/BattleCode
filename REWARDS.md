@@ -419,12 +419,55 @@ Two rules follow, for anything added later:
 
 ### What this costs, and where it gets paid back
 
-With a pure team reward there is **no credit assignment within a turn.** A
-dragon's advantage is dominated by what its ~30 teammates did while it was not
-acting. The reward is dense in *time* but not local in *space*: a pearl that paid
-`+0.03` through v3's `length_delta` now pays `2/T ≈ 0.025` of a `tanh`, diluted
-across the whole team — call it 100× weaker. Expect early learning to be slower
-than v6's, and do not read that as the spec failing.
+With a pure team reward there is **no credit assignment within a turn**, and the
+size of that problem is now measured rather than asserted. Decomposing every
+transition into the part caused by the acting dragon and the part caused by
+everyone else (exact at `γ = 1`; the identity holds to `0.00e+00`):
+
+```
+ 253,906 transitions, random play, median 11 turns per dragon
+   paid   std 0.07445
+   d_own  std 0.16719   <- the dragon's own action
+   d_team std 0.17018   <- everyone else, between its turns
+   corr(paid, own_effect)  = +0.1821   ->  R^2 = 3.3%
+```
+
+**Only 3.3% of the variance in the reward a dragon receives is explained by what
+that dragon personally did.** The other 96.7% is the interval. (Note the two
+halves are individually *larger* than the reward and cancel at −0.90, but that
+anticorrelation is partly mechanical — both share the mid-interval Φ with
+opposite signs — so `R²` against the paid reward is the number to quote, not the
+variance shares.)
+
+Caveats worth keeping attached to that 3.3%: it is measured under **random play**,
+where a dragon's own move is usually a self-inflicted death, and it is measured on
+the **reward**, not the advantage. `R + γV(s′) − V(s)` removes whatever of the
+interval the critic can predict, so the effective signal-to-noise is better than
+3.3% by an amount that cannot be measured without a trained critic.
+
+Concretely, a pearl that paid `+0.03` through v3's `length_delta` now pays about
+`2/T` of a `tanh` diluted across the team. Expect early learning to be slower than
+v6's, and do not read that as the spec failing.
+
+### The reward-side fix, and why it is not the default
+
+`set_reward_v8(..., credit=1)` (`V8_OWN`) pays each dragon only
+`Φ(after its move) − Φ(before its move)`. Attribution becomes **100% by
+construction and the variance drops** (paid std 0.0496 against 0.0745).
+
+It is tempting, and it is **not** simply better. Φ is signed per team, so summing
+`Φ_post − Φ_pre` over both teams' turns does not telescope: **whatever changes on
+the enemy's turns is paid to nobody.** Measured team total over the same 4,000
+steps: **−364.8 under INTERVAL, −571.3 under OWN.** So the policy is never charged
+for the enemy growing on the enemy's turn — only for its own moves, plus whatever
+a victim is charged when it dies. That is a **bias**, not just less noise, and it
+also gives up exact per-agent invariance and any credit for setting a teammate up.
+
+I first wrote in the code that OWN was "the same shaping re-attributed". It is
+not, and the measured totals are what showed it.
+
+So `INTERVAL` stays the default: the 3.3% is a real problem, but the fix belongs
+in the critic, not in breaking the accounting.
 
 The fix belongs on the **critic**, not the reward, because a critic-side fix
 costs nothing in rivalry: a counterfactual baseline `V(s, i)` conditioned on the

@@ -44,7 +44,8 @@ _lib.bcv_layout.argtypes = [ctypes.c_void_p]
 _lib.bcv_set_map_weights.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 _lib.bcv_set_env_opponent.argtypes = [ctypes.c_void_p] + [ctypes.c_int] * 4
 _lib.bcv_set_potential_gamma.argtypes = [ctypes.c_void_p, ctypes.c_float]
-_lib.bcv_set_reward_v8.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_float]
+_lib.bcv_set_reward_v8.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_float,
+                                   ctypes.c_int]
 _lib.bcv_ep_cols.restype = ctypes.c_int
 _lib.bcv_bot_count.restype = ctypes.c_int
 _lib.bcv_bot_name.restype = ctypes.c_char_p
@@ -321,13 +322,20 @@ class BattlecodeVecEnv:
         """Team potentials become gamma * phi(s') - phi(s); 1 = plain differences."""
         _lib.bcv_set_potential_gamma(ctypes.c_void_p(self._h), float(gamma))
 
-    def set_reward_v8(self, on: bool = True, kappa: float = 1.0) -> None:
+    def set_reward_v8(self, on: bool = True, kappa: float = 1.0, credit: int = 0) -> None:
         """Emit the reward v8 components (REWARDS.md). They arrive already
         scaled, so weight each at 1.0; `kappa` is the single knob for how strong
         the shaping is against the terminal result, and the lambdas are shares
         that do not change it. Off by default so the league and every old run
-        keep playing identically."""
-        _lib.bcv_set_reward_v8(ctypes.c_void_p(self._h), int(bool(on)), float(kappa))
+        keep playing identically.
+
+        `credit` 0 (INTERVAL) pays each dragon the change in Phi since its own
+        last turn -- exact potential shaping, but only 3.3% of the reward's
+        variance is explained by what that dragon did. 1 (OWN) pays only the
+        change across its own action: perfect attribution, at the cost of exact
+        per-agent invariance. See REWARDS.md."""
+        _lib.bcv_set_reward_v8(ctypes.c_void_p(self._h), int(bool(on)), float(kappa),
+                               int(credit))
 
     def set_opponent(self, env_index: int, team: int = -1, bot: int | str = 0,
                      map_index: int = -1) -> None:
