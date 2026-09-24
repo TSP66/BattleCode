@@ -106,6 +106,72 @@ live PPO path.
 `tests/stress.py` is green for the first time (336,105 turns, 0 mismatches):
 KNOWN_ISSUES #5, a split child's facing, was a split-path bug and is fixed.
 
+## The channel A/B: +5.5 points that are NOT the shared map (2026-09-24 ~22:40)
+
+Commit 86416711 asked for one measurement before trusting `--memchan`: play the
+teacher against a fixed league with the channel on and off, because a four-way
+broadcast from every dragon takes SC_NUM_MSGS (scalar 12, inside the 14 that
+every architecture reads) from 11% non-zero to 78%, and a clone's calibration on
+that input does not survive the shift.
+
+Run twice, once per clone of Sabotage-d 3952, against `gen4, v12, sab546`, 12
+games a map over the 8 `runs/ft3/maps`, gate seed 12345 in both arms. Raw cells
+and the two scripts are in `runs/ab_memchan/` (gitignored like every `runs/`):
+`{sonar,mixclone}_{off,on}.json`.
+
+| candidate | channel off | channel on | d |
+|---|---|---|---|
+| `runs/imitate_sab3952_only` (3952 only, 6.1M samples) | 0.4722 | 0.5209 | +0.0487 |
+| `runs/imitate_sab_3952` (3952 x1, older x0.25, 10.9M) | 0.4740 | 0.5347 | +0.0608 |
+| **pooled, 576 games/arm** | **0.4731** | **0.5278** | **+0.0547 +-0.0295 (z 1.86)** |
+
+**The base-rate worry is refuted: the channel does not damage the teacher.** It
+does the opposite. But read the next paragraph before believing the +5.5.
+
+**Neither candidate can see the shared map.** `train.imitate` clones on the
+cache's 14 scalars, and `ActorCritic.forward` slices `scalar[..., :n_scalars]`,
+so both clones read base scalars only -- memfar (690..707) does not reach them.
+Worse, two of the three league members are blind too: `gen4` and `sab546` were
+widened by `migrate_scalars` and never PPO-trained since, so their memfar columns
+are still **exactly zero** (checked; `v12` and `ratchet4/gen1` are non-zero). In 2
+of 3 matchups *neither side* can read a merged cone, and the only thing the flag
+changes for either of them is the SC_NUM_MSGS base rate.
+
+So the +5.5 is a base-rate artefact, not shared knowledge. Per opponent, averaged
+over the two clones: gen4 +0.010, v12 +0.073, sab546 +0.081 (+-0.051 each, so the
+spread is noise). The earlier A/B on `ratchet4/gen1`, the one candidate here that
+*does* read memfar, went the other way: 0.5964 -> 0.5755, d = -0.0209 +-0.051 over
+192 games/arm (`runs/ab_memchan/ab_{off,on}.json`).
+
+**What this means for ratchet5.** Keep `--memchan` -- nothing here argues against
+it, and 86416711 is right that only PPO can teach the map. But the gate hands the
+candidate roughly +5 points for free while the league cannot read memfar, so:
+
+* do not read an early vs-league gain as the channel working. Watch `vs_anchor`
+  inside the run, where both sides carry the flag;
+* the bias shrinks as promoted anchors (memchan-trained) replace the frozen
+  league, and it is worst at gen1;
+* `runs/ft3/maps` gate scores from before and after the flag are not comparable
+  in either direction. This quantifies the warning already in `ratchet5/launch.sh`.
+
+Power, for the next time this comes up: 288 games/arm resolves d >= 0.08 at 80%
+power, 576 resolves 0.06. Anything smaller than that needs ~1,600 games/arm.
+
+## ratchet5 cannot launch yet: its `--start` does not exist
+
+`runs/ratchet5/launch.sh` points at `runs/pyr_sab3952/latest.pt`. **There is no
+such file.** The distill that would have written it is
+`runs/pyr_sab3952_memchan_aborted/` -- pyramid 48x3, 0.959M params, teacher iter
+42842 (the mixed clone), `--memchan` on, stopped at iter 1250 / 41M turns with
+top-1 agreement 0.921 and still improving. It was aborted by the `--memchan`
+refusal that commit 86416711 then reverted as wrong, so **the checkpoint is
+sound**; either point `--start` at it or re-run the distill longer.
+
+Which clone to distil from does not matter: they are a dead heat in play (league
+mean 0.4722 vs 0.4740 with the channel off) even though the mixed one is ahead on
+held-out accuracy, 0.8035 vs 0.7978 -- and that comparison is rigged, since the
+held-out games come from the same mixture the mixed clone trained on.
+
 ## ratchet_train was broken, and is fixed
 
 It died on its first step with a shape mismatch: reward v8 appended five Phi
