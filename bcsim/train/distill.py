@@ -198,30 +198,39 @@ def main() -> None:
     for p in teacher.parameters():
         p.requires_grad_(False)
 
-    # --memchan is only correct when the TEACHER was trained with the channel on,
-    # and the reason is a base scalar rather than anything to do with memfar.
+    # Distilling with the channel on is legitimate, and the thing to keep an eye
+    # on is a base rate rather than anything to do with memfar.
     #
-    # num_msgs is scalar 12, inside the 14 every architecture reads. Broadcasting
-    # four ways from every dragon takes it from 100% zeros to 78% non-zero
-    # (0:22% 1:14% 2:28% 3:15% 4:20%, measured on maps-all), while a clone of a
-    # real team was fitted where it is 0 in 89% of rows -- Sabotage-d submission
-    # 3952, 813,413 rows. So the channel drives the teacher onto an input it
-    # effectively never saw, its weight on that input is barely trained, and the
-    # distribution the student is asked to copy is partly noise.
+    # Every game we clone from was played under 1.0.0, so sonar is part of the
+    # game the teacher learned, and num_msgs (scalar 12, inside the 14 every
+    # architecture reads) is a real input it has really been fitted on -- for
+    # Sabotage-d's submission 3952, 11% of 6.1M rows carry a non-zero value,
+    # which is some 670,000 rows and plenty to fit one scalar's weight. It is NOT
+    # an unseen input, and an earlier version of this check claimed it was.
     #
-    # Nor is there anything to gain. A teacher that cannot see memfar cannot act
-    # on the shared map, so the merged columns are uninformative for predicting
-    # its action and the student learns to ignore them either way. Distillation
+    # What does change is the base rate: a four-way broadcast from every dragon
+    # takes num_msgs from 11% non-zero to 78% (0:22% 1:14% 2:28% 3:15% 4:20%,
+    # measured on maps-all). The meaning survives that -- a ray stops at the
+    # first dragon it meets, so the count is a crowding measure either way, and
+    # under a blanket broadcast it is a better one -- but the calibration does
+    # not, so a teacher may read "someone is near me" more often than it should.
+    #
+    # Whether that costs anything is measurable, not arguable: play the teacher
+    # against a fixed league with the channel on and off. Hence a warning that
+    # prints the numbers, not a refusal.
+    #
+    # Separately, and not a reason against: a teacher that cannot see memfar
+    # cannot act on the shared map, so those columns are uninformative for
+    # predicting its action and the student will learn to ignore them. Distillation
     # cannot teach the use of a channel the teacher is blind to; only PPO can.
     if a.memchan and not bool(ta.get("memchan", False)):
-        raise SystemExit(
-            f"--memchan with a teacher that was not trained with it ({a.teacher}).\n"
-            "Broadcasting moves num_msgs (scalar 12, which every net reads) from ~0 to\n"
-            "1-4 on most turns, and a behaviour clone never saw that, so the target you\n"
-            "would be copying is partly untrained behaviour. It buys nothing either: a\n"
-            "teacher blind to memfar cannot act on the shared map, so the student learns\n"
-            "to ignore it regardless. Distil without --memchan and let PPO learn the\n"
-            "channel, or pass a teacher from a --memchan run.")
+        print("NOTE: --memchan with a teacher that was not trained with it "
+              f"({a.teacher}).\n"
+              "  The games it was cloned from were played under 1.0.0, so sonar is part of\n"
+              "  the game it learned and num_msgs is an input it has really been fitted on.\n"
+              "  What shifts is the base rate: broadcasting four ways from every dragon\n"
+              "  takes num_msgs from ~11% non-zero to ~78%. Measure the teacher against a\n"
+              "  fixed league with the channel on and off before trusting this.", flush=True)
 
     ac = a.arch == "actorcritic"
     pyr = a.arch == "pyramid"
