@@ -405,6 +405,86 @@ to them. The causal dragon's action is correlated with it every time, so signal
 accumulates there and noise averages out — slowly. That is the variance the
 counterfactual baseline has to remove.
 
+## Discounting: what actually carries medium-term credit
+
+`γ = 0.997`, `potential_gamma = γ` (required, or invariance breaks), GAE
+`λ = 0.95`. Unchanged from v6, and the reason is that **v8 turns a 500-turn credit
+problem into a ~10-turn one**, which is the point of the whole redesign.
+
+First, a unit that is easy to get wrong: `rollout.py` chains transitions by uid,
+so **an agent step is one dragon's turn, which is one round.** Every horizon
+number below is in rounds, not env steps. (The env advances ~30 turns per round
+with 30 dragons alive; that is not the agent's clock.)
+
+### γ sets the horizon; λ sets where credit actually lands
+
+```
+gamma^500 -- how much a round-500 outcome is worth on round 0
+   gamma=0.995  0.0816   horizon 1/(1-g) = 200 rounds
+   gamma=0.997  0.2226   horizon 1/(1-g) = 333 rounds
+   gamma=0.999  0.6064   horizon 1/(1-g) = 1000 rounds
+```
+
+But `1/(1−γ)` is not the credit window. Through GAE it is `1/(1 − γλ)`:
+
+```
+                 0.90      0.95      0.98      0.99   <- lambda
+ g=0.997          9.7      18.9      43.6      77.1   rounds
+```
+
+```
+fraction of a reward N rounds later reaching the action, (gamma*lambda)^N, g=0.997
+  lambda=0.95: 1t:0.947  5t:0.762  10t:0.581  20t:0.338  50t:0.066  100t:0.004
+  lambda=0.98: 1t:0.977  5t:0.890  10t:0.793  20t:0.629  50t:0.313  100t:0.098
+```
+
+So at the defaults, **credit flows back ~19 rounds**, and a payoff 5 rounds out
+keeps 76% of it. Both of the cases named:
+
+* **Lining up a kill.** Costs ~0 in Φ now (nothing about position is in Φ), pays
+  45× a pearl 3–5 rounds later, of which 76–89% reaches the setup move. Works
+  comfortably at `λ = 0.95`.
+* **A portal jump that expands reach.** Moves Φ by *nothing at all* — no length,
+  no count, at most one coverage tile. It is reward-neutral, which is correct: we
+  do not want to pay for portal-jumping as such. Its value has to come from the
+  **critic** recognising the position, not from the reward.
+
+### The honest gap
+
+**Φ contains no positional or territorial information whatsoever** — only
+lengths, counts and cumulative coverage. "This portal expands our reach", "my head
+is two tiles off their leader's neck", "that corridor is a trap" are *entirely* on
+`f_θ` in `V = Φ + f_θ`. The residual is small for material questions and not small
+at all for positional ones.
+
+Two consequences: the critic needs the **board planes** (which `BoardCritic`
+already has, and which is now the main reason it exists), and anything whose payoff
+is further out than the GAE window reaches the policy only through `V`, never
+through the reward. Beyond ~50 rounds, `(γλ)^N` is 0.066 — the reward path is
+gone and the critic is the only path left.
+
+### Why the discount matters less than it would have
+
+Under a sparse win reward, credit has to cross up to 500 rounds; `(γλ)^500` is
+`1e-12`, which is why the critic had to memorise whole games and why it collapsed.
+Under v8 the credit only has to reach from an action to **the next change in Φ**,
+which for a kill setup is 3–10 rounds and for a pearl is 1. That is what the dense
+reward actually buys, and it is why `γ` is not the lever it would otherwise be.
+
+### If medium-term setup behaviour does not emerge
+
+Raise **GAE λ, not γ.** `λ = 0.98` widens the window from 19 to 44 rounds and
+takes a 20-round payoff from 34% to 63%. The cost is variance, which v8's team
+reward already has plenty of (teammate noise), so it compounds — try it only after
+the counterfactual baseline is in, and change one at a time.
+
+`γ = 1` is more defensible here than in most problems: the horizon is hard-bounded
+at 500 rounds, the round number is already observed, and at `γ = 1` plain
+undiscounted deltas become *exactly* correct potential shaping (the `(1−γ)Φ`
+artifact vanishes). Not worth switching without measurement — it is the highest
+variance option on the table — but it is not the mistake it usually is, and worth
+recording as a real alternative rather than an error.
+
 ## Hand-set weights
 
 Round `t ∈ [0, 500]`, `s = t/500`.
