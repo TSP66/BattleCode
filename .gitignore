@@ -13,10 +13,16 @@ __pycache__/
 runs/*
 !runs/anchors/
 !runs/submitted/
-# scraped games (raw .replay + .json). The per-game datasets are derived and
-# large (6 GB): rebuild them with train.replay_dataset (see DISTILL.md)
-!runs/replays/
-runs/replays/*/dataset/
+# Scraped games (raw .replay + .json) are NOT tracked: re-fetch them with
+# train.replay_fetch, and rebuild the per-game datasets with
+# train.replay_dataset (see DISTILL.md). 16 GB on disk here.
+#
+# History note: replays for ten teams WERE tracked and are still in origin's
+# history up to 7e98ef48; recover them with
+#     git checkout 7e98ef48 -- runs/replays
+# A later scrape added 18,778 more files and GitHub refused the push
+# ("remote unpack failed: index-pack failed"), so tracking them was dropped.
+runs/replays/
 # the 8 live maps every eval, clone and fine-tune uses
 !runs/ft3/
 runs/ft3/*
@@ -33,9 +39,12 @@ runs/ft6/snapshots/*
 runs/imitate_*/*
 !runs/imitate_*/best.pt
 !runs/imitate_*/log.jsonl
-# replay-pretrained team critic (its 4.9 GB extract is rebuilt by team_critic extract)
+# replay-pretrained team critic. Every extract it writes is derived and huge, so
+# ignore them by prefix rather than one at a time -- `data_board/` (8 GB) slipped
+# through a rule that named only `data/` and was committed by accident.
 !runs/team_critic/
-runs/team_critic/data/
+runs/team_critic/data*/
+runs/team_critic/*.out
 # small result files
 !runs/server_tests/
 !runs/critic_probe/
