@@ -29,12 +29,68 @@ Run `python3 tests/test_msg_transfer.py` for the numbers. What it establishes:
 indistinguishable from a dragon that spawned, and an encoder has to be trained
 against the specific child its parent seeded.
 
-Still not done: `memcodec.py` is wired to nothing, and the received bits are not
-network features (only `num_msgs`, the count, is). The decode belongs in torch,
-so the sim does not need to change again for it.
+## The bits are now features: the team's shared map (train/memfeat.py)
+
+`--memchan` on `train.ratchet` / `train.ratchet_train` turns it on. Every dragon
+declares protocol 3, broadcasts a 64-bit packet four ways, and what it hears is
+unioned into its own **memfar** features. Run `python3 tests/test_memfeat.py`.
+
+**Why the packet is hand-written and `memcodec.py` is not deployed.** memcodec's
+measurements are real, but `wide` planes are centred on the sender's HEAD and
+rotated to its FACING. A child's head is the parent's old segment `len - k`,
+several cells away and usually facing elsewhere, so planes decoded from a
+parent's code describe the world around the PARENT. Injecting them into the
+child's frame is an offset-plus-rotation error of several cells. An
+absolute-coordinate packet has no frame to get wrong -- `SC_HEAD_X` is `hx / w`
+and is not mirrored per team, so a cell means the same thing to every dragon --
+and the geometry becomes exact arithmetic instead of something a decoder has to
+learn. It also costs ~0 judge points instead of 18.1M.
+
+What it carries, and why those fields: 3 expected-pearl cells in absolute
+coordinates, plus memfar's 4 directional pearl weights as compass bearings.
+memfar ALREADY means "the nearest expected pearls I know about" and "how much
+pearl weight lies that way", so the receiver's block keeps its meaning and is
+merely computed over the team's knowledge. **No column moves and no checkpoint
+is invalidated** -- the pyramid reads memfar as part of its 32 scalars and the
+flat 708-scalar nets read the same numbers, so both benefit untrained.
+
+The cones are in there because of a measurement, not a guess. Pearl cells alone
+did almost nothing for children: a child hears a packet 77.8% of the time, so
+delivery is fine, but the parent is ADJACENT, so its nearest pearls are ones the
+child can already see (a child is not blind at birth -- its first look fills its
+fresh memory, and 86% already know a pearl). What a child lacks is everything
+further out. With the cones, a **child's total cone weight nearly doubles,
+1.473 -> 2.779**, and a weight rises on 64.3% of children's first turns.
+
+With a *trained* policy it does considerably more than under random play, as
+expected -- a ray is dragged the length of a body before it flies, so longer
+dragons reach further: **0.77 pearls merged per turn against 0.19**, heard 63%
+against 49%, a cone lifted on 55% of turns against 39%.
+
+Cost 1.6ms a step at 1,024 envs, ~5% of a rollout iteration. `MAX_READ = 4` was
+measured, not picked: it gets 99.9% of the cone gain and 94% of the pearl rescues
+for 54% of the work, and nothing beyond 8 messages ever changed a number.
+
+The one case it cannot help is a dragon that knows no pearl anywhere: it heard a
+pearl on only 7.8% of such turns, and on **100% of those it was given one**. That
+is delivery-bound, not payload-bound -- it is alone, and a ray stops at the first
+dragon it meets.
+
+Not yet done for deployment: `mybot/` needs the same 60 lines of integer math
+(declare protocol 3, cast the packet, merge the inbox into memfar before the
+forward pass), and `distill.py` should collect with the channel on if PPO trains
+with it.
 
 `tests/stress.py` is green for the first time (336,105 turns, 0 mismatches):
 KNOWN_ISSUES #5, a split child's facing, was a split-path bug and is fixed.
+
+## ratchet_train was broken, and is fixed
+
+It died on its first step with a shape mismatch: reward v8 appended five Phi
+components to the privileged features (`PRIV_COUNT` 8 -> 13) while the frozen
+team critic is pretrained on the base 8. Nothing to do with the channel -- the
+live PPO path simply could not start. `priv_buf` now takes `obs.priv[:, :N_PRIV]`,
+the same slicing its scalar row already did.
 
 ## Adopted: the pyramid
 

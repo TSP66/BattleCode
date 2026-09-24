@@ -44,7 +44,7 @@ os.environ.setdefault("BCSIM_LIB", str(pathlib.Path(__file__).resolve().parents[
                                        / "bcsim" / "libbcvec_priv.so"))
 
 import bcsim                                    # noqa: E402
-from train import augment, team_critic          # noqa: E402
+from train import augment, memfeat, team_critic  # noqa: E402
 from train.finetune import load_policy          # noqa: E402
 from train.net import masked_logits, policy_out  # noqa: E402
 from train.rollout import Rollout               # noqa: E402
@@ -96,6 +96,15 @@ def parse() -> argparse.Namespace:
     p.add_argument("--aug-per-map", type=int, default=48)
     p.add_argument("--aug-original-share", type=float, default=0.25)
     p.add_argument("--calib-share", type=float, default=1 / 32)
+    p.add_argument("--memchan", action="store_true",
+                   help="the team's shared map: every dragon broadcasts its nearest "
+                        "expected pearls and its directional pearl weights as 64 bits "
+                        "of sonar, and what it hears is unioned into its own memfar "
+                        "features (train/memfeat.py). A newborn child inherits its "
+                        "parent's sense of where pearls are instead of starting blank. "
+                        "It moves memfar, which every architecture reads, so the GATE "
+                        "must be run with it too, and a league measured without it is "
+                        "not strictly comparable")
     p.add_argument("--explore", type=float, default=0.0,
                    help="share of the learner's sampling spread uniformly over legal "
                         "actions (see the note at the sampling site)")
@@ -191,6 +200,10 @@ def main() -> None:
         learner[envs] = np.where(fz, rng.integers(0, 2, len(envs)), -1)
 
     assign(np.arange(N))
+    chan = memfeat.MemChannel(N) if a.memchan else None
+    if chan is not None:
+        print("shared-map channel on: every dragon speaks protocol 3 and broadcasts "
+              "four ways", flush=True)
     zero_ctx = torch.zeros(1, 1, device=dev)
     outcome_u = torch.tensor(team_critic.OUTCOME_VALUE, device=dev)
     wide_shape = ((bcsim.WIDE_CH, bcsim.WIDE_SIDE, bcsim.WIDE_SIDE)
@@ -237,12 +250,18 @@ def main() -> None:
     for it in range(n_iters):
         policy.eval()
         roll.begin()
+        if chan is not None:
+            chan.reset_stats()          # the logged rates are this iteration's
         nxt_team.fill(-1)
         term_cls.fill(-1)
         last.fill(-1)
         ended = {}
         t0 = time.perf_counter()
         for t in range(T):
+            # before anything reads the observation: the merge rewrites memfar,
+            # which the policy, the teacher, the opponents and the critic all see
+            if chan is not None:
+                chan.receive(obs)
             staged = roll.stage(obs, env.wide)
             w_now = staged[3] if policy.wants_wide else None
             learn = (learner < 0) | (obs.team == learner)
@@ -270,7 +289,12 @@ def main() -> None:
                         ol = masked_logits(ol.float(), staged[2][rows])
                         action[rows] = torch.multinomial(ol.softmax(1), 1).squeeze(1)
             roll.record(t, staged, obs, action, logp, zero_v, learn=learn)
-            priv_buf[t] = torch.from_numpy(obs.priv).to(dev)
+            # the frozen critic was pretrained on the BASE privileged features,
+            # before reward v8 appended its five Phi components (PRIV_COUNT went
+            # 8 -> 13), so it is given the eight it knows -- the same reason its
+            # scalar row is sliced above. Without this the run dies on its first
+            # step with a shape mismatch.
+            priv_buf[t] = torch.from_numpy(obs.priv[:, :N_PRIV]).to(dev)
             tm = obs.team.astype(np.int64)
             rnd_cpu[t] = obs.round
             team_cpu[t] = obs.team
@@ -280,7 +304,11 @@ def main() -> None:
             has = prev >= 0
             nxt_team[prev[has], envs_ix[has]] = t
             last[tm, envs_ix] = t
-            obs, closures, eps = env.step(action.to(torch.int32).cpu().numpy())
+            acts = action.to(torch.int32).cpu().numpy()
+            # the payload is built from the MERGED row, so a dragon relays what it
+            # was told and knowledge travels further than one hop
+            obs, closures, eps = (env.step(acts, *chan.send(obs)) if chan is not None
+                                  else env.step(acts))
             roll.close(closures, no_reward)
             if len(eps.rows):
                 e = eps.rows[:, 0].astype(np.int64)
@@ -410,7 +438,8 @@ def main() -> None:
                "return_mean": float(flat(ret).mean()), "value_mean": float(flat(v_team).mean()),
                "explained_var": round(ev_team, 4),
                "elapsed": round(time.perf_counter() - t_start, 1),
-               **{k: round(v, 5) for k, v in st.items()}}
+               **{k: round(v, 5) for k, v in st.items()},
+               **(chan.rates() if chan is not None else {})}
         if resolved and it % 5 == 0:
             p_ = np.concatenate([r[0] for r in resolved])
             y_ = np.concatenate([r[1] for r in resolved])

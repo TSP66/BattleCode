@@ -100,7 +100,8 @@ def gate(a) -> None:
         nets.append(onet)
         opps.append({"name": name, "act": greedy(onet, dev), "path": path})
     res = evaluate(greedy(net, dev), opps, maps, map_names, games=a.games,
-                   threads=a.threads, seed=a.seed, max_seconds=a.max_seconds)
+                   threads=a.threads, seed=a.seed, max_seconds=a.max_seconds,
+                   memchan=a.memchan)
 
     # merge the anchor repeats into one opponent
     cells, summary = res["cells"], res["summary"]
@@ -179,6 +180,15 @@ class Supervisor:
             self.s = json.loads(self.state_path.read_text())
             self.say(f"resumed: gen {self.s['gen']} segment {self.s['segment']}, "
                      f"anchor {self.s['anchor']}, {self.s['turns'] / 1e6:.1f}M turns")
+            # the shared map changes what every net in the league reads, so
+            # turning it on or off mid-experiment would make the gate scores
+            # before and after incomparable and the promotions meaningless
+            if bool(self.s.get("memchan", False)) != bool(self.a.memchan):
+                raise SystemExit(
+                    f"this run was started with --memchan {self.s.get('memchan', False)} "
+                    f"and you passed {bool(self.a.memchan)}. That moves memfar for every "
+                    "net in the league, so the gate scores would not be comparable: "
+                    "start a new --run directory instead")
             return
         (self.run / "anchors").mkdir(exist_ok=True)
         a0 = self.run / "anchors" / "gen0.pt"
@@ -189,7 +199,8 @@ class Supervisor:
         self.s = {"gen": 1, "segment": 0, "anchor": str(a0), "anchor_name": f"gen0 ({seed_tag})",
                   "anchor_scores": None, "league": [[n, str(p)] for n, p in DEFAULT_LEAGUE],
                   "cand": None, "turns": 0, "lr": self.a.lr, "discards": 0,
-                  "seed": 1, "failures": 0, "promotions": 0}
+                  "seed": 1, "failures": 0, "promotions": 0,
+                  "memchan": bool(self.a.memchan)}
         self.save()
         self.say(f"new ratchet from {self.a.start}")
 
@@ -211,6 +222,8 @@ class Supervisor:
                 "--out", str(out), "--games", str(self.a.games),
                 "--anchor-reps", str(self.a.anchor_reps), "--seed", str(self.s["seed"] * 7 + 3),
                 "--max-seconds", str(self.a.gate_seconds)]
+        if self.a.memchan:
+            args.append("--memchan")
         if getattr(self.a, "gate_maps", ""):
             args += ["--maps", self.a.gate_maps]
         if anchor:
@@ -295,6 +308,7 @@ class Supervisor:
                     "--opponents", ",".join(paths), "--opp-names", ",".join(names),
                     "--opp-weights", ",".join(f"{x:.4f}" for x in w),
                     "--self-frac", str(self.a.self_frac), "--kl-coef", str(self.a.kl_coef),
+                    *(["--memchan"] if self.a.memchan else []),
                     *(["--maps", self.a.train_maps] if self.a.train_maps else []),
                     *(["--live-maps", self.a.live_maps, "--live-share", str(self.a.live_share)]
                       if self.a.live_maps and self.a.live_share > 0 else []),
@@ -449,6 +463,11 @@ def main() -> None:
     r.add_argument("--lr-patience", type=int, default=2)
     r.add_argument("--kl-coef", type=float, default=0.5)
     r.add_argument("--self-frac", type=float, default=0.2)
+    r.add_argument("--memchan", action="store_true",
+                   help="train and gate with the team's shared map (train/memfeat.py). "
+                        "Both halves get it or neither: it moves memfar, so a candidate "
+                        "trained with it and gated without would be measured on "
+                        "different features from the ones it learned on")
     r.add_argument("--explore", type=float, default=0.0,
                    help="uniform-exploration share for NEW candidates (ratchet_train --explore)")
     r.add_argument("--games", type=int, default=12, help="gate games per (opponent, map)")
@@ -473,6 +492,7 @@ def main() -> None:
     g.add_argument("--threads", type=int, default=16)
     g.add_argument("--seed", type=int, default=12345)
     g.add_argument("--max-seconds", type=float, default=3600)
+    g.add_argument("--memchan", action="store_true")
     a = p.parse_args()
     if a.cmd == "gate":
         gate(a)

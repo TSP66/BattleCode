@@ -33,6 +33,7 @@ import torch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 import bcsim                                    # noqa: E402
+from train import memfeat                       # noqa: E402
 from train.net import ActorCritic, PyramidActorCritic, masked_logits   # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]  # repo root
@@ -139,7 +140,7 @@ def _call(fn, obs, rows, wide=None):
 def evaluate(learner, opponents: list[dict], maps: list[str], map_names: list[str],
              games: int = 16, threads: int = 8, seed: int = 12345,
              max_seconds: float = 900.0, progress: float = 0.0,
-             sonar: bool = False) -> dict:
+             sonar: bool = False, memchan: bool = False) -> dict:
     """Plays `games` per (opponent, map) cell, half on each side.
 
     opponents: {"name", "bot": index} for a scripted bot, or {"name", "act":
@@ -160,7 +161,11 @@ def evaluate(learner, opponents: list[dict], maps: list[str], map_names: list[st
     # in the env broadcasts -- so the frozen opponents also see a non-zero
     # num_msgs, which is why a league measured with sonar on is not directly
     # comparable with one measured without it.
-    print(f"  sonar {'on' if sonar else 'off'}", flush=True)
+    print(f"  sonar {'on' if sonar else 'off'}"
+          f"{', shared-map channel on' if memchan else ''}", flush=True)
+    if memchan and sonar:
+        raise ValueError("--memchan already declares protocol 3 and broadcasts four "
+                         "ways; --sonar as well would only add a zero payload")
     env = bcsim.BattlecodeVecEnv(maps, num_envs=n, num_threads=threads, seed=seed,
                                  closure_capacity=max(8192, n * 160), wide=any_wide,
                                  sonar=sonar)
@@ -179,6 +184,9 @@ def evaluate(learner, opponents: list[dict], maps: list[str], map_names: list[st
     results: list[list] = [[] for _ in range(n)]
     turns = np.zeros(n, np.int64)          # learner turns, for portal usage
     portal = np.zeros(n, np.float64)
+    # the shared map has to be on in the gate if it was on in training: it moves
+    # memfar, which every architecture here reads
+    chan = memfeat.MemChannel(n) if memchan else None
     obs = env.reset()
     t0 = time.perf_counter()
     last_report = t0
@@ -191,6 +199,8 @@ def evaluate(learner, opponents: list[dict], maps: list[str], map_names: list[st
             print(f"  eval hit its {max_seconds:.0f}s limit, "
                   f"{int((done < per_side).sum())} envs short", flush=True)
             break
+        if chan is not None:
+            chan.receive(obs)
         mine = obs.team == learner_team
         acts = np.zeros(n, np.int32)
         if mine.any():
@@ -202,7 +212,8 @@ def evaluate(learner, opponents: list[dict], maps: list[str], map_names: list[st
         # portal usage is only counted against bots: there every closure is the
         # learner's, whereas against a network both sides' turns close
         turns += mine & (done < per_side) & is_bot
-        obs, closures, eps = env.step(acts)
+        obs, closures, eps = (env.step(acts, *chan.send(obs)) if chan is not None
+                              else env.step(acts))
         if len(closures.env):
             keep = is_bot[closures.env] & (done[closures.env] < per_side)
             np.add.at(portal, closures.env[keep], closures.comps[keep, PORTAL])
