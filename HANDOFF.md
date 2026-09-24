@@ -3,6 +3,39 @@
 Nothing is training. Nothing has been launched. The full reward spec is
 `REWARDS.md`; this is only what state the repo is in.
 
+## The parent-to-child channel now works and is measured (c8f409fb)
+
+The simulator can carry a parent's full 64 bits to the child it just split off.
+Four narrowings were in the way, all in the vec layer -- `Action` could cast only
+ONE ray along the dragon's facing with a 32-bit payload, the observation's message
+buffer was `uint32`, `Action` had no protocol field (so protocol 3 could only be
+had through `cfg_.sonar`, which also forces a four-way broadcast), and `MAX_MSGS`
+was 4 against a protocol with no cap, which dropped messages constantly.
+
+Run `python3 tests/test_msg_transfer.py` for the numbers. What it establishes:
+
+* payloads arrive byte-exact at full width, 0 mangled;
+* **delivery is not reliable.** 57% of children hear their parent at birth, rising
+  with the parent's length (56% at length 4, 94% at 14). Broadcasting every turn
+  reaches 65% at birth and 89% by the child's sixth turn. **A codec must not
+  assume the bits arrive.**
+* the engine tells a receiver only the payload, never the sender, so a child that
+  hears several sonars identifies its parent from the bits alone -- that is what
+  memcodec's `SONAR_TAG` is for;
+* inboxes reach 24 deep, so `MAX_MSGS` is 64 and `Observation.num_msgs` carries
+  the true uncapped count. Check it, never `len(msgs)`.
+
+`env.last_splits(env_index)` gives (parent, child, k): a child is otherwise
+indistinguishable from a dragon that spawned, and an encoder has to be trained
+against the specific child its parent seeded.
+
+Still not done: `memcodec.py` is wired to nothing, and the received bits are not
+network features (only `num_msgs`, the count, is). The decode belongs in torch,
+so the sim does not need to change again for it.
+
+`tests/stress.py` is green for the first time (336,105 turns, 0 mismatches):
+KNOWN_ISSUES #5, a split child's facing, was a split-path bug and is fixed.
+
 ## Adopted: the pyramid
 
 On a 1,080-game round robin (`runs/roundrobin_arch.json`) the pyramid tops the
