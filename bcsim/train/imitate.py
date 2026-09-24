@@ -138,7 +138,24 @@ def main() -> None:
     print(f"{len(files)} games: ~{n_train:,} train samples in {len(tr_files)} games, "
           f"{len(va['action']) if va else 0:,} held out from {len(held)} games", flush=True)
 
-    net = ActorCritic(bcsim.N_CHANNELS, bcsim.N_SCALARS, bcsim.N_ACTIONS,
+    # The scalar width comes from the DATA, never from the env. A clone is
+    # trained on what clone_cache.py stored -- the 14 base scalars -- while the
+    # env's row has since grown to 708 and then 713 as mem, memfar and the sonar
+    # echoes were appended. Taking bcsim.N_SCALARS here built a 713-wide first
+    # Linear and fed it 14 columns, which is a shape error on the first batch and
+    # is why this had stopped running at all.
+    #
+    # The result is therefore a 14-scalar network, exactly as before, and
+    # train/migrate_scalars.py widens it afterwards by padding that Linear with
+    # zero columns -- verified to play identically, which is the whole reason the
+    # frozen league survived the row growing.
+    n_sc = int(va["scalar"].shape[1]) if va is not None else int(
+        np.load(tr_files[0])["scalar"].shape[1])
+    if n_sc != bcsim.N_SCALARS:
+        print(f"cloning on {n_sc} scalars (the cache's width); the env now writes "
+              f"{bcsim.N_SCALARS}, so widen with train.migrate_scalars before this "
+              f"net meets the env", flush=True)
+    net = ActorCritic(bcsim.N_CHANNELS, n_sc, bcsim.N_ACTIONS,
                       width=a.width, blocks=a.blocks, hidden=a.hidden).to(dev)
     opt = torch.optim.AdamW(net.parameters(), lr=a.lr, weight_decay=1e-4)
     steps = a.epochs * (n_train // a.batch + len(tr_files) // a.games_per_chunk + 2)
