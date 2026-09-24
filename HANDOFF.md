@@ -76,10 +76,32 @@ pearl on only 7.8% of such turns, and on **100% of those it was given one**. Tha
 is delivery-bound, not payload-bound -- it is alone, and a ray stops at the first
 dragon it meets.
 
+A packet states only what its sender has itself observed, never what it was told.
+A cone is measured from the SENDER'S position, so relaying compounds that error
+until every dragon claims pearls in every direction, and a relayed pearl cell
+never expires. That costs about half the raw volume (0.09 pearls merged a turn
+against 0.19) and `relay=True` is left available to measure against.
+
+**Bolted onto a policy trained without it, the channel is neutral.** 96 games a
+side with `runs/ratchet4/anchors/gen1.pt`:
+
+| opponent | channel off | channel on | delta |
+| --- | --- | --- | --- |
+| gen4 | 0.5417 | 0.5260 | -0.016 (-0.2 sigma) |
+| v12 | 0.6510 | 0.6250 | -0.026 (-0.4 sigma) |
+
+Both within noise, both slightly down -- which is what an unadapted policy
+reading a shifted feature should look like, and it is NOT evidence the channel
+helps. It has to earn that by being trained with. `runs/ratchet5/launch.sh` is
+written and **not launched**; it needs a new `--run` directory, because memfar
+moves for every net in the league and the state file refuses to flip the flag
+mid-experiment.
+
 Not yet done for deployment: `mybot/` needs the same 60 lines of integer math
 (declare protocol 3, cast the packet, merge the inbox into memfar before the
 forward pass), and `distill.py` should collect with the channel on if PPO trains
-with it.
+with it. `train.py` and `finetune.py` have no `--memchan`; the ratchet is the
+live PPO path.
 
 `tests/stress.py` is green for the first time (336,105 turns, 0 mismatches):
 KNOWN_ISSUES #5, a split child's facing, was a split-path bug and is fixed.
