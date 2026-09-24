@@ -1,10 +1,11 @@
 # Reward v8 — team potential, hand-set weights
 
 Supersedes v1–v7 (`train/train.py`). Written 2026-09-24 from the proposal kept
-below as v8-draft, with four corrections that are load-bearing: one term was
+below as v8-draft, with five corrections that are load-bearing: one term was
 sign-inverted, one rebuilt a failure we have already had, the torus makes the
-dispersion term undefined as written, and the time-varying weights have to sit
-*inside* the banked potential or the shaping stops telescoping.
+dispersion term undefined as written, the time-varying weights have to sit
+*inside* the banked potential or the shaping stops telescoping, and Φ must be
+normalised by `Σλ` or **winning a game you dominated pays a negative reward**.
 
 ## Why we are moving
 
@@ -79,11 +80,15 @@ With `λ_win` rising that pays the policy **not to be ahead early**; with
 `λ_len` falling it pays the policy to hold length for its own sake. Both are
 artifacts and neither is visible in any logged component.
 
-**Bank `λ(t)·Φ`, not `Φ`.** Then `Φ̃(s,t) = λ(t)Φ(s)` is a potential over the
-extended state `(s,t)` and invariance holds exactly. This matters extra because
-`add_team_delta` banks at *each agent's own last turn*, so `t` and `t′` differ
-per dragon: the λ must be evaluated at the round stored alongside the bank, not
-at the current round.
+**Bank the fully weighted value, not the bare `Φᵢ`.** Then `Φ̃(s,t)` is a
+potential over the extended state `(s,t)` and invariance holds exactly. "Fully
+weighted" includes the normaliser: `1/Σλ(t)` is time-varying too, so banking
+`λᵢ(t)Φᵢ` and dividing by today's `Σλ` reintroduces the same artifact through the
+divisor. Bank `κ·λᵢ(t)·Φᵢ / Σλ(t)`.
+
+This matters extra because `add_team_delta` banks at *each agent's own last
+turn*, so `t` and `t′` differ per dragon: every λ must be evaluated at the round
+stored alongside the bank, not at the current round.
 
 ## v8, exactly
 
@@ -98,17 +103,77 @@ a  = 2(A3_0 − A3_E) / (A3_0 + A3_E)
 ```
 
 ```
-Φ = λ_win(t)  · tanh(r + λ_z · tanh(z))                 win condition + tie-break
-  + λ_len(t)  · tanh(z)                                 dense total-length signal
-  + λ_top3(t) · tanh(a)                                 eggs in more than one basket
-  + λ_kill(t) · (exp(−N_E/c) − exp(−N_0/c))             finish them off
-  + λ_exp(t)  · tanh(ε · (C_0 − C_E))                   explore and fan out
+          κ
+Φ = ───────────  ·
+     Σᵢ λᵢ(t)
+
+    [ λ_win(t)  · tanh(r + λ_z · tanh(z))               win condition + tie-break
+    + λ_len(t)  · tanh(z)                               dense total-length signal
+    + λ_top3(t) · tanh(a)                               eggs in more than one basket
+    + λ_kill(t) · (exp(−N_E/c) − exp(−N_0/c))           finish them off
+    + λ_exp(t)  · tanh(ε · (C_0 − C_E)) ]               explore and fan out
 ```
 
-`λ_z = 0.4`, `c = 4`, `ε = 0.005`. Every term is antisymmetric under team swap,
-so `Φ_A = −Φ_B` exactly and self-play sees a true zero-sum game. Every term is
-bounded, so `|Φ| ≤ Σλᵢ` at compile time — the thing v6 did not have, since its
-`team_max` was raw segment count.
+`λ_z = 0.4`, `c = 4`, `ε = 0.005`, `κ = 1.0`. Every term is antisymmetric under
+team swap, so `Φ_A = −Φ_B` exactly and self-play sees a true zero-sum game.
+
+### Normalise by Σλ. This is not cosmetic.
+
+Every term is individually bounded to `[−1, 1]`, so dividing by `Σλᵢ(t)` gives
+**`|Φ| ≤ κ` at every round**, with `κ` the one knob for how strong the shaping is
+against the outcome. Three things follow, and the first is a bug fix.
+
+**1. Un-normalised, winning a game you dominated pays a negative reward.** The
+terminal branch is `R_T = W·outcome − λ(T)Φ(s_T)`. Raw Φ overshoots `W = 1`:
+
+```
+terminal reward at t=500, a WIN
+ position                            raw Phi   R_T raw  norm Phi  R_T norm
+ crushing  L 30v8  T 90v20  N 9v2     +2.021    -1.021    +0.879    +0.121
+ clear     L 24v14 T 70v40  N 7v4     +1.324    -0.324    +0.576    +0.424
+ narrow    L 20v19 T 60v57  N 6v6     +0.144    +0.856    +0.063    +0.937
+ squeaked  L 20v20 T 61v60  N 6v6     +0.026    +0.974    +0.011    +0.989
+```
+
+A crushing win is charged **−1.02** for actually ending the game. The policy
+would learn to hold a won position rather than close it, which is precisely what
+`λ_kill` exists to prevent. Normalised, `Φ_T ≤ κ = W`, so `R_T = W − Φ_T ≥ 0` is
+guaranteed: converting a win is always weakly positive. This is a structural
+guarantee, not a tuning outcome.
+
+It also makes the terminal handoff *consistent* rather than a bolted-on
+convention. On the same scale as the outcome, Φ is a continuous estimate of the
+final result, the shaping is a smooth interpolation toward it, and the jump at
+termination is small (+0.12 for a crushing win) instead of a sign flip.
+
+**2. `Σλ` is non-monotone, so the raw form pays for time passing — in a direction
+that reverses mid-game.**
+
+```
+  t=  0  sum=3.100
+  t=150  sum=1.946  d/dt -0.00737
+  t=200  sum=1.921  d/dt -0.00051
+  t=250  sum=2.000  d/dt +0.00158
+  t=500  sum=2.300  d/dt +0.00082
+```
+
+The sag to 1.92 at round 200 and the climb back to 2.30 are an accident of five
+schedule shapes added together, not a design. A held position is charged for the
+clock on the way down and paid for it on the way up. Normalising removes it by
+construction; getting the same effect by hand would mean constraining five
+formulas to sum to a constant.
+
+**3. It decouples the mix from the strength.** Raw, `λ_win` sets both the endgame
+sharpness *and* the total shaping magnitude, so sharpening the endgame silently
+strengthens all the shaping. Normalised, the λ are **shares** — pure mix — and
+`κ` alone sets strength. Two things we tune for different reasons stop being the
+same number.
+
+The cost, stated plainly: normalising divides every `ΔΦ` by `Σλ ≈ 2` and so
+halves the dense signal relative to the terminal ±1. `κ` is there to put it back.
+`κ = 1.0` is a starting guess, not a measurement — it puts the shaping and the
+outcome on equal footing, against roughly 2× for v3–v6 (`team_max` 0.06 × a
+length gap of ~40).
 
 ### `tanh(r + λ_z tanh z)`, not `tanh(r) + λ_z sech²(r) tanh(z)`
 
@@ -295,22 +360,43 @@ Round `t ∈ [0, 500]`, `s = t/500`.
 | `λ_top3` | `0.6 · clamp((s − 0.4)/0.6, 0, 1)` | 0 | 0 | 0.10 | 0.35 | 0.60 | "don't put all eggs in one basket" only matters once there is something to lose |
 | `λ_kill` | `0.8 (1 − s³)` | 0.80 | 0.79 | 0.70 | 0.46 | 0 | decent for most of the game, out at the end where `λ_win` says the same thing |
 | `λ_exp` | `1.0 · max(0, 1 − t/150)` | 1.00 | 0.17 | 0 | 0 | 0 | opening only |
+| `κ` | constant | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 | shaping strength against the outcome |
 | `W` (terminal) | constant | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 | the only non-telescoping term |
+
+Because Φ is divided by `Σλ`, only the **shares** matter. Those are the numbers to
+read, and they say what the reward actually cares about at each stage of the game:
+
+| share | 0 | 100 | 150 | 250 | 375 | 500 |
+|---|---|---|---|---|---|---|
+| `win` | 0.097 | 0.150 | 0.210 | 0.300 | 0.446 | **0.652** |
+| `len` | 0.323 | 0.363 | **0.390** | 0.300 | 0.183 | 0.087 |
+| `top3` | 0 | 0 | 0 | 0.050 | 0.160 | 0.261 |
+| `kill` | 0.258 | 0.343 | **0.400** | 0.350 | 0.211 | 0 |
+| `exp` | **0.323** | 0.144 | 0 | 0 | 0 | 0 |
+
+Which is the draft's intent, made legible: the terminal win condition is a tenth
+of the reward on round 0 and two thirds of it at the end; exploration is a third
+of the opening and gone by 150; the finisher peaks mid-game and is switched off at
+the end where `λ_win` says the same thing; total length carries the early signal;
+resilience only appears once there is something to lose.
 
 Two schedules in substance — one shaping ramp down (`λ_len`, `λ_exp`), one
 outcome ramp up (`λ_win`, `λ_top3`) — with `λ_kill` following the outcome ramp
 inverted. The intra-group ratios are fixed.
 
-`Σλᵢ(t)` peaks at **3.10 on round 0** and sits between 2.00 and 2.30 from round
-250 on (`[0.3, 1.0, 0, 0.8, 1.0]` at the peak). So `|Φ| ≤ 3.1` everywhere, and
-the critic's output scale should be chosen for roughly ±3, not ±1.
+`|Φ| ≤ κ = 1` everywhere, so the critic's output scale is ±1.
 
 ## Invariants and guards
 
 * Antisymmetry: `Φ(swap(s)) = −Φ(s)` exactly, for every term, at every λ. Assert
   it in a test over random team states — it is the cheapest possible check that
   self-play stays zero-sum.
-* Boundedness: `|Φ| ≤ Σλᵢ(t)`. Assert.
+* Boundedness: `|Φ| ≤ κ`. Assert. And `R_T = W·outcome − Φ(s_T)` must be ≥ 0 for
+  a win and ≤ 0 for a loss — assert that too, since it is the guarantee the
+  normalisation buys and the only thing stopping the policy from declining to
+  finish a won game.
+* `Σλᵢ(t) ≥ 1.92` over the whole game with these schedules, so the divisor is
+  never near zero. Any reschedule has to keep it away from zero, or clamp.
 * A living dragon has at least a head, so `T ≥ N ≥ 1` and every denominator is
   ≥ 1 while the game runs. A team on 0 dragons ends the game, which is paid by
   the terminal branch, so `0/0` never arises — but adopt `0/0 = 0` anyway and
@@ -327,12 +413,12 @@ the critic's output scale should be chosen for roughly ±3, not ±1.
 
 ## The critic follows from this
 
-Most of the return is now `λ(t)Φ(s)`, and **Φ is an analytic function of
-privileged team state that we can compute exactly.** So build the critic as a
-residual around it:
+Most of the return is now `Φ(s,t)`, and **Φ is an analytic function of privileged
+team state that we can compute exactly.** So build the critic as a residual
+around it:
 
 ```
-V(s) = λ(t)·Φ(s) + f_θ(s)
+V(s) = Φ(s, t) + f_θ(s)
 ```
 
 `f_θ` learns only what Φ does not already explain. The critic starts holding the
@@ -341,13 +427,20 @@ which is precisely where the memorisation was happening. This is a bigger lever
 on the collapse than any λ choice, and it drops into `train/critic_net.py`
 alongside the counterfactual baseline above.
 
+The normalisation helps here too, and by more than convenience. `Φ` and the
+terminal outcome now live on the same `[−1, 1]`, so `V` has a fixed known range
+for the whole game: a `tanh` output head is correct by construction, `f_θ` is a
+small correction to a quantity of size 1 rather than a quantity that drifts
+between 1.9 and 3.1, and the residual target has stationary scale. With the raw
+form, `f_θ` would have had to learn the `Σλ(t)` envelope as well as the game.
+
 ## Where it goes in the code
 
 | piece | file | note |
 |---|---|---|
 | sorted lengths, `A3` | `bc_vec.hpp` `team_stats` | extend to fill a sorted top-3; currently returns total/longest/units |
 | coverage counts | `bc_vec.hpp` `Env` | `visited[2][area]` + count, set on head entry |
-| Φ and the λ schedules | `bc_vec.hpp` `add_team_delta` | bank `λ(t)Φᵢ` per component, with the round |
+| Φ and the λ schedules | `bc_vec.hpp` `add_team_delta` | bank `κλᵢ(t)Φᵢ/Σλ(t)` per component, with the round |
 | terminal handoff | `bc_vec.hpp` finish path (~`:810`) | `Φ(terminal) := W·outcome`, replacing `RW_WIN/LOSE/DRAW/ELIMINATED` |
 | weights, version table | `train/train.py` | `REWARD_V8`; keep v1–v7 for reproducing old runs |
 | antisymmetry + bound tests | `bcsim/tests/test_rewards.py` | new |
@@ -373,6 +466,9 @@ them would break every saved run's log schema.
   activity.
 * Euclidean variance about a centroid — undefined on a torus. Not a tuning
   problem; there is no number to compute.
+* An un-normalised Φ (raw `Σλᵢ(t)Φᵢ`) — charges a crushing win **−1.02** for
+  ending the game, and pays for the clock in a direction that reverses at round
+  200 because `Σλ` sags to 1.92 and climbs back to 2.30.
 
 ## Open
 
@@ -385,3 +481,6 @@ them would break every saved run's log schema.
 * Whether the counterfactual baseline alone closes the credit-assignment gap.
   There is no per-dragon reward to fall back on if it does not, so this is the
   one place v8 could need real work rather than retuning.
+* `κ = 1.0` is a guess. It is now the *only* knob for shaping strength, so it is
+  the first thing to sweep, and the cheapest — it rescales every term at once and
+  cannot change the mix.
