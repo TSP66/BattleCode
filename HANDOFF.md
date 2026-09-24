@@ -1,3 +1,88 @@
+# Reward v8 and the pyramid — 2026-09-24
+
+Nothing is training. Nothing has been launched. The full reward spec is
+`REWARDS.md`; this is only what state the repo is in.
+
+## Adopted: the pyramid
+
+On a 1,080-game round robin (`runs/roundrobin_arch.json`) the pyramid tops the
+Bradley-Terry fit but is **exactly even head-to-head with the two strongest flat
+nets (0.500 against both)**, and its lead over them is 0.8σ and 0.7σ. The only
+architecture difference the data supports is **pyramid > ConvLSTM** (2.5σ). So the
+case for adopting it is **cost, not strength**: 0.96M parameters against 1.58M and
+51.2M judge points against 69.1M, leaving 29.8M spare. Read the older section
+below before quoting the ranking at anyone.
+
+**It cannot be submitted yet.** `export_cpp.py` has no arch dispatch at all.
+
+## Reward v8 is built, tested and wired — not run
+
+`cpp/bc_reward8.hpp` is the potential as a pure function of two team shapes, free
+of Game and Env. `bc_vec.hpp` supplies the shapes and banks the fully weighted
+`kappa*lambda_i*Phi_i/sum(lambda)` per component. Off by default and verified so:
+worst |diff| on every v1-v7 component between v8 on and off is **0.000e+00**.
+
+    cd bcsim && python -m train.train --reward v8 --v8-kappa 1.0
+
+The critic is `V(s) = -Phi(s) + f_theta(s)`, with Phi supplied by the ENGINE
+through the privileged row (`PRIV_COUNT` 8 -> 13) rather than reimplemented in
+torch. `f_theta` is a tanh head, zero-initialised, so at init the critic's
+prediction *is* the analytic -Phi.
+
+**Four bugs were found while building it, all in the spec rather than the code.**
+They are written up in REWARDS.md with numbers; the short version:
+
+* `V = +Phi` was the wrong sign — shaping is a loan, so a high-Phi state has
+  *less* return left. `+Phi` would have doubled the critic's starting error.
+* a finisher over unit count pays **+0.019 for a free split of a non-leader**.
+  Now over total length, which a split conserves: exactly 0.00000.
+* the v1-v7 `primed` flag meant **a dragon's first action got no reward at all**.
+* the telescoping invariant is per *agent*, not per episode, and asserting the
+  wrong one was actively hiding the bug above.
+
+## The one number to know before launching
+
+**Only 3.3% of the variance in the reward a dragon receives is explained by what
+that dragon personally did** (253,906 transitions, random play, median 11 turns
+per dragon). The rest is teammates and enemies moving in between. That is the
+price of a pure team reward.
+
+`set_reward_v8(..., credit=1)` makes attribution 100% and lowers variance, but it
+is **biased** — Phi is per-team-signed, so enemy-turn changes are paid to nobody
+(team total -364.8 vs -571.3). It is not the default. **The fix belongs in the
+critic as a counterfactual baseline, and that is the main piece of open work.**
+
+Two settings are unmeasured guesses: `kappa = 1.0` (now the only strength knob, so
+sweep it first) and `eps = 0.005`. And expect early learning to look slower than
+v6's — that is the team reward working as designed.
+
+## Tests
+
+All green: `test_ego`, `test_vecenv`, `test_seam`, `test_rewards`, `test_reward8`
+(400k random shapes), `test_reward8_env`, `parity_memory` (144,000 turns, max
+|diff| 0), `parity_wide`.
+
+`test_rewards.py` was **already failing at HEAD** before any of this, for an
+unrelated reason: its premise 1 is untestable under masked play, because a step is
+one tile so the 7x7 window always contains the target and the mask always forbids
+moving onto a body (396 masked games: 372 kills, all 372 head-ons). It now also
+runs unmasked and reaches 296 non-head-on kills, all 296 paid.
+
+## Still open
+
+* the counterfactual baseline (above) — the only piece that might need real work
+* pyramid deployment: `export_cpp.py` arch dispatch, a second conv trunk in
+  `mybot/net.hpp`, wide planes from `mybot/memory.hpp`, new wasmprobe parity
+* `mybot` speaks legacy sonar (prints no `PROTOCOL`); adopting protocol 3 moves
+  the block it parses and needs a `check_bot.sh` pass
+* the sonar kelp residual (~7% on kelp maps); ray length limit and portal
+  crossing are the two untested candidates
+* real truncated BPTT for the ConvLSTM; the current result is a one-step floor
+* ratchet4's gate numbers were produced through the broken CUDA-graph harness and
+  need remeasuring
+
+---
+
 # Handoff — 2026-09-24 morning: every earlier league number is suspect
 
 ## READ THIS FIRST: the evaluation harness was lying
