@@ -349,6 +349,62 @@ refactor.
 If early learning stalls badly, the lever is `λ_exp` and `λ_len` — the two dense
 *team* terms — not a per-dragon term.
 
+### What "team-level" does and does not mean
+
+Three statements that are easy to run together. Only the third is the constraint.
+
+1. **One reward function, over team state.** Yes — there is a single Φ and it
+   reads nothing but team aggregates.
+2. **Different dragons receive very different rewards on different turns.**
+   Also yes, and by large factors. `add_team_delta` pays each agent
+   `γΦ(now) − Φ(its own last turn)`, so **the dragon whose action caused a jump
+   in Φ is the one whose transition brackets that jump.**
+3. **The same event pays the same whoever did it.** This is the constraint. If A
+   kills their leader or B kills their leader, the team position moved
+   identically, so the reward is identical. We do not care which dragon does it —
+   and that is exactly what makes a sacrifice learnable, because the reward never
+   asks whose body died, only what the trade was worth.
+
+So local behaviour is rewarded, and rewarded *proportionally to what it was
+worth*, because Φ is a nonlinear function of team state and different events move
+it by wildly different amounts. Measured at round 250, ours `[20,14,9,6,4]`
+against theirs `[22,15,10,5,3]`, κ = 1:
+
+| event | ΔΦ | in pearls |
+|---|---|---|
+| eat a pearl (small dragon) | +0.0078 | 1.0× |
+| eat a pearl (our leader) | +0.0235 | 3.0× |
+| kill their smallest (3) | +0.0520 | 6.6× |
+| kill their 3rd (10) | +0.1175 | 15.0× |
+| **kill their biggest (22)** | **+0.3531** | **45.2×** |
+| our leader (20) just dies | −0.3080 | −39.4× |
+| **trade: our 4 for their 22** | **+0.2997** | **+38.3×** |
+| trade: our 20 for their 22 | +0.0261 | +3.3× |
+| split our leader 20 → 10+10 | −0.0849 | −10.9× |
+
+Killing their leader is worth **45 pearls**. Throwing a length-4 dragon away to do
+it is worth **38 pearls**. Trading our own leader for theirs is worth 3 — nearly
+neutral, correctly, since the bodies were nearly equal. At round 450 the same
+kill is worth 72 pearls and the leader-for-leader trade 6, because `λ_win` has
+taken over.
+
+This is *strictly better differentiated* than v3's flat `kills: 0.75`, which paid
+the same for killing a length-2 mob dragon as for killing their leader. That
+flatness is what produced the kamikaze collapse: a head-on always paid
+`+0.75 − 0.25`, whatever it killed. Under v8 a head-on is priced by the trade and
+nothing else.
+
+What "no individual terms" actually forbids is narrow: **a term that reads the
+acting dragon's own body instead of team state.** `own_length_delta`, `died`,
+`pearls`, a flat `kills`. Those are the terms that would make A's reward depend on
+*who* rather than on *what it was worth*.
+
+The genuine cost stays the one above: teammates see the same jump credited to
+their own next turn, and their actions were not correlated with it, so it is noise
+to them. The causal dragon's action is correlated with it every time, so signal
+accumulates there and noise averages out — slowly. That is the variance the
+counterfactual baseline has to remove.
+
 ## Hand-set weights
 
 Round `t ∈ [0, 500]`, `s = t/500`.
@@ -472,9 +528,12 @@ them would break every saved run's log schema.
 
 ## Open
 
-* `ε = 0.005` per new tile is a guess. It should be set so one new tile is worth
-  roughly a third of a pearl-equivalent to the team; measure the actual coverage
-  rate in a rollout first.
+* `ε = 0.005` per new tile, measured rather than guessed now: on a small early
+  state (`[8,6,5,4]` each side) five fresh tiles pay `+0.0074` at round 20 against
+  `+0.0278` for a pearl on the leader, so **one tile ≈ 0.05 pearls** and a team of
+  ~30 dragons each covering a tile pays a little over one pearl per turn. That
+  seems right for an opening bonus, but it is one rollout-free calculation; check
+  the real coverage rate before trusting it.
 * Whether `λ_len` and the gated `z` inside `Φ_win` double-count enough to matter.
   They are deliberately redundant — dense early, gated late — but if the policy
   over-values total length in the midgame, `λ_len` is the knob.
