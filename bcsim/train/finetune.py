@@ -185,7 +185,8 @@ def main() -> None:
     teacher.eval()
     for q in teacher.parameters():
         q.requires_grad_(False)
-    n_priv = 8 if a.privileged else 0            # PRIV_COUNT in bc_vec.hpp
+    # base features only; the v8 Phi components are sliced off by the net
+    n_priv = bcsim.PRIV_BASE if a.privileged else 0
     critic = Critic(bcsim.N_CHANNELS, bcsim.N_SCALARS, n_ctx,
                     width=a.critic_width, blocks=a.critic_blocks, n_extra=n_priv).to(dev)
     popt = torch.optim.AdamW(policy.parameters(), lr=a.lr, weight_decay=0.0, eps=1e-5)

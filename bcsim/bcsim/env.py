@@ -44,6 +44,7 @@ _lib.bcv_layout.argtypes = [ctypes.c_void_p]
 _lib.bcv_set_map_weights.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 _lib.bcv_set_env_opponent.argtypes = [ctypes.c_void_p] + [ctypes.c_int] * 4
 _lib.bcv_set_potential_gamma.argtypes = [ctypes.c_void_p, ctypes.c_float]
+_lib.bcv_set_reward_v8.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_float]
 _lib.bcv_ep_cols.restype = ctypes.c_int
 _lib.bcv_bot_count.restype = ctypes.c_int
 _lib.bcv_bot_name.restype = ctypes.c_char_p
@@ -52,6 +53,18 @@ _lib.bcv_bot_name.argtypes = [ctypes.c_int]
 _layout = (ctypes.c_int * 8)()
 _lib.bcv_layout(_layout)
 N_CHANNELS, WINDOW, N_SCALARS, MAX_MSGS, N_ACTIONS, N_REWARD_COMPS, MAX_STEPS, N_MOVES = _layout
+
+# Privileged critic features. PRIV_BASE is the original global summary, and the
+# rest are reward v8's potential components for the acting dragon's team, emitted
+# by the engine so the critic's anchor V = -Phi + f_theta is exact rather than a
+# reimplementation that can drift. A net built before these existed declares
+# n_priv = PRIV_BASE and slices, exactly as a flat policy slices the scalar row.
+_lib.bcv_priv_count.restype = ctypes.c_int
+PRIV_COUNT = int(_lib.bcv_priv_count())
+PRIV_BASE = 8
+N_PHI_TERMS = PRIV_COUNT - PRIV_BASE
+PHI_COMPS = ["v8_win", "v8_len", "v8_top3", "v8_kill", "v8_exp"]
+assert N_PHI_TERMS == len(PHI_COMPS), "PRIV_COUNT is out of step with bc8::N_TERMS"
 EP_COLS = _lib.bcv_ep_cols()
 # the remembered map as planes: 2 * 6 channels of WIDE_SIDE x WIDE_SIDE, the
 # near scale then the pooled far one (cpp/bc_memory.hpp `wide`)
@@ -88,7 +101,12 @@ REWARD_COMPS = ["length_delta", "pearls", "sprint_cost", "split_cost", "died",
                 "kills", "enemy_deaths", "ally_deaths", "win", "lose", "draw",
                 "final_length", "splits",
                 "team_len", "team_max", "foe_len", "foe_max",
-                "portal", "eliminated", "team_units", "foe_units"]
+                "portal", "eliminated", "team_units", "foe_units",
+                # reward v8 (REWARDS.md): five components of one bounded
+                # zero-sum team potential, already scaled by
+                # kappa * lambda_i(t) / sum(lambda(t)), so their weights are 1.0
+                # and not knobs. Only the terminal result is weighted.
+                "v8_win", "v8_len", "v8_top3", "v8_kill", "v8_exp", "outcome"]
 assert len(REWARD_COMPS) == N_REWARD_COMPS, "REWARD_COMPS is out of step with RW_COUNT"
 
 # A sensible starting point: grow, stay alive, win. Override per experiment.
@@ -302,6 +320,14 @@ class BattlecodeVecEnv:
     def set_potential_gamma(self, gamma: float) -> None:
         """Team potentials become gamma * phi(s') - phi(s); 1 = plain differences."""
         _lib.bcv_set_potential_gamma(ctypes.c_void_p(self._h), float(gamma))
+
+    def set_reward_v8(self, on: bool = True, kappa: float = 1.0) -> None:
+        """Emit the reward v8 components (REWARDS.md). They arrive already
+        scaled, so weight each at 1.0; `kappa` is the single knob for how strong
+        the shaping is against the terminal result, and the lambdas are shares
+        that do not change it. Off by default so the league and every old run
+        keep playing identically."""
+        _lib.bcv_set_reward_v8(ctypes.c_void_p(self._h), int(bool(on)), float(kappa))
 
     def set_opponent(self, env_index: int, team: int = -1, bot: int | str = 0,
                      map_index: int = -1) -> None:

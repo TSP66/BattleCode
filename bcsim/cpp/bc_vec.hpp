@@ -10,6 +10,7 @@
 #include "bc_text.hpp"
 #include "bc_bots.hpp"
 #include "bc_memory.hpp"
+#include "bc_reward8.hpp"
 
 #include <atomic>
 #include <cmath>
@@ -75,13 +76,36 @@ enum RewardComp {
     // reward v6: team potentials over log(1 + living units), concave so a few
     // units are worth having and many are not
     RW_TEAM_UNITS, RW_FOE_UNITS,
+    // reward v8 (REWARDS.md): five components of ONE bounded zero-sum team
+    // potential, already scaled by kappa * lambda_i(t) / sum(lambda(t)), so the
+    // trainer's weight for each is 1.0. Banked separately only so the dashboard
+    // can still attribute a move to a term -- that attribution is what caught
+    // v3's kamikaze collapse inside 30 iterations.
+    RW_V8_WIN, RW_V8_LEN, RW_V8_TOP3, RW_V8_KILL, RW_V8_EXP,
+    // reward v8: the true game result, +1 / 0 / -1, and the only term in v8
+    // that does not telescope. Paid to every transition still open at the end,
+    // which is survivors plus the dragons that died on the wiping turn. A
+    // dragon that died earlier is already closed and reaches the result only
+    // through what its death did to the potential, which is the point.
+    RW_OUTCOME,
     RW_COUNT
 };
+static_assert(bc8::N_TERMS == 5, "RW_V8_* must match bc8::Term");
 
 constexpr int MAX_MSGS = 4;
 // privileged critic features: our total / longest / units, theirs, round,
 // and the longest-dragon margin (see VecEnv::observe)
-constexpr int PRIV_COUNT = 8;
+// Privileged critic features. The first 8 are the original global summary; the
+// last 5 are reward v8's potential components for the ACTING dragon's team, at
+// the current state, already scaled exactly as the reward banks them.
+//
+// They are emitted by the engine rather than recomputed in Python because
+// V(s) = -Phi(s) + f_theta(s) is only an exact anchor if the Phi the critic
+// subtracts is the same Phi the reward paid. A second implementation in torch
+// would drift, and the drift would be invisible -- it would look like ordinary
+// critic error. See REWARDS.md.
+constexpr int PRIV_BASE = 8;
+constexpr int PRIV_COUNT = PRIV_BASE + bc8::N_TERMS;   // 13
 // board planes: own body, own heads, enemy body, enemy heads, pearls,
 // inside-the-map, kelp on the north edge, kelp on the west edge, then the
 // acting dragon's own body and head, and how soon a pearl is due per tile
@@ -132,6 +156,12 @@ struct VecConfig {
     // phi(then). 1 reproduces plain differences (reward v1/v2); set it to the
     // PPO gamma to make it potential-based shaping.
     float potential_gamma = 1.0f;
+    // Compute the reward v8 components as well. Off by default: it costs a
+    // per-turn scan for the sorted top three and it only means anything to a
+    // trainer that weights RW_V8_*, so the league and every old run are
+    // untouched. The v1-v7 components keep being emitted either way.
+    bool reward_v8 = false;
+    bc8::Params v8;
 };
 
 // One open transition waiting to be closed with its reward.
@@ -144,6 +174,23 @@ struct AgentAcc {
     // the team picture as this agent last saw it, for the team potentials
     int team_len = 0, team_max = 0, foe_len = 0, foe_max = 0;
     int team_units = 0, foe_units = 0;
+    // reward v8: the FULLY weighted potential as this agent last saw it, i.e.
+    // kappa * lambda_i(t) * Phi_i / sum(lambda(t)) evaluated at that agent's own
+    // last turn. Storing the weighted value rather than the bare Phi_i is not a
+    // convenience: lambda and the normaliser are both functions of the round, so
+    // re-weighting an old Phi with today's lambda injects a reward proportional
+    // to -Phi * d(lambda)/dt that pays the policy not to be ahead early.
+    float v8[bc8::N_TERMS] = {0};
+    // Separate from `primed`, which only becomes true after the agent's first
+    // ACTION. For v8 that is too late: the first bank would then be taken after
+    // the dragon moved, so everything its team did earlier in round 0 is never
+    // paid, and because dragons act in index order that bias is systematic --
+    // measured at -0.38 on v8_len per episode even with almost no deaths.
+    // Dragons present at the spawn are primed at Phi(s_0) instead, which is
+    // exactly 0 on a symmetric spawn, so their transitions telescope cleanly.
+    // A split child still primes on its own first turn: it did not exist
+    // before, so there is nothing earlier to pay it for.
+    bool v8_primed = false;
     bool primed = false;    // false until the agent has taken one turn
     uint64_t banked_at = ~0ull;   // env turn the potentials were last banked on
 };
@@ -190,6 +237,13 @@ struct Env {
     int len_lost[2] = {0, 0}, len_killed[2] = {0, 0};
     int headon[2] = {0, 0};      // kills where the killer died in the same collision
     uint64_t turn = 0;           // dragon turns taken in this env, for banking
+    // reward v8: distinct tiles each team's heads have stood on this episode,
+    // and the count. One byte per tile per team, so 8 KB per env at the 64x64
+    // maximum. Monotone, so the exploration term cannot be farmed by
+    // oscillating, and it is what makes spreading out instrumental rather than
+    // paid: ground a teammate has covered is used up.
+    std::vector<uint8_t> covered[2];
+    int cover_n[2] = {0, 0};
 
     // Per-dragon remembered map (bc_memory.hpp). Slots are pooled: dragon ids
     // are handed out by dragons.size() and never reused inside an episode, and
@@ -280,6 +334,12 @@ public:
     // (-1 = none) to a scripted bot. Also take effect at the next episode, so
     // call reset() after setting them.
     void set_potential_gamma(float g) { cfg_.potential_gamma = g; }
+    // Reward v8. kappa is the single knob for how strong the shaping is against
+    // the outcome; the lambdas are shares and do not change it.
+    void set_reward_v8(bool on, float kappa) {
+        cfg_.reward_v8 = on;
+        cfg_.v8.kappa = kappa;
+    }
 
     void set_env_opponent(int env_index, int team, int bot_kind, int fixed_map) {
         Env& e = envs_[env_index];
@@ -538,12 +598,32 @@ private:
         e.deaths[0] = e.deaths[1] = e.kills[0] = e.kills[1] = 0;
         e.len_lost[0] = e.len_lost[1] = e.len_killed[0] = e.len_killed[1] = 0;
         e.headon[0] = e.headon[1] = 0;
+        const size_t area = (size_t)e.map->area();
+        for (int t = 0; t < 2; t++) {
+            e.covered[t].assign(area, 0);
+            e.cover_n[t] = 0;
+        }
         e.episode++;
         e.mem_clear();          // every dragon of the new episode starts blank
         e.agents.assign(e.game.dragons.size(), AgentAcc());
         for (size_t i = 0; i < e.agents.size(); i++) {
             e.agents[i].uid = e.uid_of(e.game.dragons[i].id);
             e.agents[i].last_len = e.game.dragons[i].len;
+        }
+        if (cfg_.reward_v8) {
+            // Prime every spawned dragon at Phi(s_0), so its first transition
+            // spans from the start of the game rather than from its own first
+            // move. On a symmetric spawn this is 0 for both teams.
+            for (int t = 0; t < 2; t++) {
+                float phi[bc8::N_TERMS];
+                bc8::potential(team_shape(e, (uint8_t)t), team_shape(e, (uint8_t)(1 - t)),
+                               e.game.round, cfg_.max_rounds, e.map->area(), cfg_.v8, phi);
+                for (size_t i = 0; i < e.agents.size(); i++) {
+                    if (e.game.dragons[i].team != t) continue;
+                    for (int k = 0; k < bc8::N_TERMS; k++) e.agents[i].v8[k] = phi[k];
+                    e.agents[i].v8_primed = true;
+                }
+            }
         }
         (void)index;
     }
@@ -611,6 +691,28 @@ private:
         }
     }
 
+    // Reward v8 wants the three longest as well: the win condition is the
+    // longest and the tie-break is the total, so the free parameter worth
+    // pricing is whether there is a second and third real dragon. A running
+    // top-three beats sorting, since a team can hold 60-odd dragons.
+    static bc8::TeamShape team_shape(const Env& e, uint8_t team) {
+        bc8::TeamShape s;
+        int t1 = 0, t2 = 0, t3 = 0;
+        for (const Dragon& d : e.game.dragons) {
+            if (!d.alive || d.team != team) continue;
+            s.total += d.len;
+            s.units++;
+            const int l = d.len;
+            if (l > t1) { t3 = t2; t2 = t1; t1 = l; }
+            else if (l > t2) { t3 = t2; t2 = l; }
+            else if (l > t3) { t3 = l; }
+        }
+        s.longest = t1;
+        s.top3 = t1 + t2 + t3;
+        s.covered = e.cover_n[team];
+        return s;
+    }
+
     static float units_phi(int units) { return std::log1p((float)units); }
 
     // Pays an agent the change in the team potentials since its own last turn.
@@ -618,11 +720,17 @@ private:
     // weights shape behaviour without changing which policy is optimal. It is
     // also how a dragon that dies usefully gets paid: its final transition
     // still sees the enemy length it took with it.
-    void add_team_delta(Env& e, int agent) {
+    // `terminal` makes the target potential zero instead of Phi(s), which is
+    // how the v8 components hand over to RW_OUTCOME: the last transition pays
+    // -phi(then), and the outcome is the only reward left that does not
+    // telescope. Without that handoff the episode would end holding a potential
+    // it never gives back, and a dominant position would be worth more than
+    // actually winning from it.
+    void add_team_delta(Env& e, int agent, bool terminal = false) {
         AgentAcc& acc = e.agents[agent];
         // at most once per turn: with a discount, banking the same state twice
         // would add a spurious (gamma - 1) * phi
-        if (acc.banked_at == e.turn) return;
+        if (!terminal && acc.banked_at == e.turn) return;
         acc.banked_at = e.turn;
         const uint8_t team = e.game.dragons[agent].team;
         int tl, tm, tu, fl, fm, fu;
@@ -646,7 +754,41 @@ private:
         acc.foe_max = fm;
         acc.team_units = tu;
         acc.foe_units = fu;
+
+        if (cfg_.reward_v8) {
+            float now[bc8::N_TERMS] = {0};
+            if (!terminal) {
+                const bc8::TeamShape us = team_shape(e, team);
+                const bc8::TeamShape them = team_shape(e, (uint8_t)(1 - team));
+                bc8::potential(us, them, e.game.round, cfg_.max_rounds,
+                               e.map ? e.map->area() : 0, cfg_.v8, now);
+            }
+            if (acc.v8_primed) {
+                const float g = cfg_.potential_gamma;
+                for (int k = 0; k < bc8::N_TERMS; k++)
+                    acc.comps[RW_V8_WIN + k] += g * now[k] - acc.v8[k];
+            }
+            for (int k = 0; k < bc8::N_TERMS; k++) acc.v8[k] = now[k];
+            acc.v8_primed = true;
+        }
+
         acc.primed = true;
+    }
+
+    // Reward v8 coverage. EV_STEP already carries the destination tile, so this
+    // needs no change to the engine at all. Called before add_team_delta,
+    // because the exploration term reads the counts.
+    void mark_coverage(Env& e, int actor) {
+        if (!cfg_.reward_v8) return;
+        const uint8_t team = e.game.dragons[actor].team;
+        std::vector<uint8_t>& seen = e.covered[team];
+        for (const Event& ev : e.game.events) {
+            if (ev.kind != EV_STEP) continue;
+            if (ev.b < 0 || (size_t)ev.b >= seen.size()) continue;
+            if (seen[ev.b]) continue;
+            seen[ev.b] = 1;
+            e.cover_n[team]++;
+        }
     }
 
     // Turns this turn's events into reward components for everyone affected.
@@ -658,6 +800,7 @@ private:
         const int after_len = e.game.dragons[actor].alive ? e.game.dragons[actor].len : 0;
         me.comps[RW_LENGTH_DELTA] += (float)(after_len - before_len);
         if (e.game.dragons[actor].alive) me.last_len = after_len;
+        mark_coverage(e, actor);
         add_team_delta(e, actor);
 
         for (const Event& ev : e.game.events) {
@@ -808,7 +951,15 @@ private:
             if (!acc.open) continue;
             const Dragon& d = e.game.dragons[i];
             // the dead banked their potentials when they died
-            if (d.alive) add_team_delta(e, (int)i);
+            if (d.alive) add_team_delta(e, (int)i, /*terminal=*/true);
+            // reward v8: the result, to every transition still open. A dragon
+            // that died earlier is already closed and never sees this -- it is
+            // paid only what its death did to the potential, which is what makes
+            // a sacrifice pay for the trade rather than for surviving.
+            if (cfg_.reward_v8) {
+                acc.comps[RW_OUTCOME] += winner < 0 ? 0.0f
+                                       : winner == (int)d.team ? 1.0f : -1.0f;
+            }
             if (d.alive) {
                 acc.comps[RW_FINAL_LENGTH] += (float)d.len;
                 if (winner < 0) acc.comps[RW_DRAW] += 1.0f;

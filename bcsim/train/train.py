@@ -128,11 +128,36 @@ REWARD_V6 = {**REWARD_V5, "eliminated": -1.0, "team_units": 0.3, "foe_units": -0
 # and pays the shared policy to mob, so self-play produces the opponent it
 # has to learn to defend against. Kept separate from v6 to attribute effects.
 
+# v8: ONE bounded zero-sum team potential plus the true result, and nothing else.
+# See REWARDS.md for the derivation and for every measurement behind it.
+#
+# There are no per-dragon terms at all -- no died, no pearls, no kills, no
+# length. Every dragon on the team receives the identical reward stream, which is
+# what makes a sacrifice learnable, and the constraint is that no dragon of ours
+# may ever be rewarded at the expense of another of ours. Dragons compete for
+# ground (a tile a teammate covered is used up) and never for reward.
+#
+# The five v8_* components arrive from the engine ALREADY scaled by
+# kappa * lambda_i(t) / sum(lambda(t)), so their weights here are 1.0 and are not
+# knobs -- the mix lives in the lambda schedules in cpp/bc_reward8.hpp and the
+# strength lives in kappa (--v8-kappa). `outcome` is the only non-telescoping
+# term and the only one that decides what the optimal policy is.
+#
+# Expect early learning to be SLOWER than v6's: with no per-dragon term a pearl
+# that paid +0.03 through length_delta now pays about 2/T of a tanh diluted across
+# the whole team, call it 100x weaker. That is the credit-assignment cost of a
+# team reward and it is meant to come out of the critic (a counterfactual baseline
+# conditioned on the acting dragon), not out of the reward.
+REWARD_V8 = {
+    "v8_win": 1.0, "v8_len": 1.0, "v8_top3": 1.0, "v8_kill": 1.0, "v8_exp": 1.0,
+    "outcome": 1.0,
+}
+
 REWARDS = {"v1": REWARD_V1, "v2": REWARD_V2, "v3": REWARD_V3, "v4": REWARD_V4,
-           "v5": REWARD_V5, "v6": REWARD_V6}
+           "v5": REWARD_V5, "v6": REWARD_V6, "v8": REWARD_V8}
 # v1/v2 used plain differences in the team potentials
 POTENTIAL_DISCOUNT = {"v1": False, "v2": False, "v3": True, "v4": True, "v5": True,
-                      "v6": True}
+                      "v6": True, "v8": True}
 
 
 def parse() -> argparse.Namespace:
@@ -148,6 +173,10 @@ def parse() -> argparse.Namespace:
     p.add_argument("--lam", type=float, default=0.95)
     p.add_argument("--clip", type=float, default=0.2)
     p.add_argument("--reward", default="v4", choices=sorted(REWARDS))
+    p.add_argument("--v8-kappa", type=float, default=1.0,
+                   help="reward v8 only: shaping strength against the terminal result. "
+                        "The one knob -- it rescales every term at once and cannot "
+                        "change the mix, so it is the first thing to sweep")
     p.add_argument("--ent", type=float, default=0.01, help="entropy bonus at the start")
     p.add_argument("--ent-end", type=float, default=0.003, help="floor it decays toward")
     # v2 halved every 500M and its entropy had collapsed (~0.32) by 500M turns
@@ -211,6 +240,8 @@ def main() -> None:
         e.set_map_weights(map_w)
         if POTENTIAL_DISCOUNT[a.reward]:
             e.set_potential_gamma(a.gamma)
+        if a.reward == "v8":
+            e.set_reward_v8(True, a.v8_kappa)
         return e, names, map_w, areas
 
     def size_alpha(total: int) -> float:

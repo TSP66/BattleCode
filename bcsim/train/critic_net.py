@@ -74,6 +74,7 @@ def down(cin: int, cout: int) -> nn.Sequential:
 class BoardCritic(nn.Module):
     def __init__(self, n_channels: int, n_scalars: int, n_context: int,
                  n_board_ch: int, board_side: int = 64, n_priv: int = 8,
+                 n_phi: int = 0,
                  board_width: tuple[int, int, int] = (24, 48, 64),
                  board_blocks: tuple[int, int] = (2, 2),
                  near_width: int = 64, near_blocks: int = 4,
@@ -83,6 +84,11 @@ class BoardCritic(nn.Module):
         super().__init__()
         self.n_context = n_context
         self.n_priv = n_priv
+        # Reward v8: how many of the privileged features are Phi components. When
+        # non-zero the value head predicts only the RESIDUAL, and Phi is added
+        # analytically in forward(). n_priv counts the base features only, so a
+        # critic saved before v8 existed loads unchanged and slices.
+        self.n_phi = n_phi
         self.sin_dim = sin_dim
         w0, w1, w2 = board_width
         b1, b2 = board_blocks
@@ -125,12 +131,31 @@ class BoardCritic(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden, hidden), nn.SiLU(),
             nn.Dropout(dropout))
+        # `team` gives win/draw/loss logits. Under v8 this is no longer a
+        # separate job from the value: f_theta IS a discounted expected result, so
+        # the 3-way head is the same quantity with a better-conditioned loss
+        # (cross-entropy against the realised result) and it regularises the
+        # trunk, which is where the overfitting was.
         self.team = nn.Linear(hidden, 3)
-        self.self_v = nn.Linear(hidden, n_context)
         nn.init.orthogonal_(self.team.weight, 0.1)
         nn.init.zeros_(self.team.bias)
-        nn.init.orthogonal_(self.self_v.weight, 1.0)
-        nn.init.zeros_(self.self_v.bias)
+
+        if n_phi:
+            # V(s) = -Phi(s) + f_theta(s), and f_theta = gamma^(T-t) * W *
+            # E[outcome] is bounded in [-1, 1], so tanh is right by construction
+            # rather than a guess. Starting at zero means the critic's opening
+            # prediction is exactly the analytic -Phi.
+            self.resid = nn.Linear(hidden, 1)
+            nn.init.zeros_(self.resid.weight)
+            nn.init.zeros_(self.resid.bias)
+            self.self_v = None
+        else:
+            # pre-v8: the dragon's own shaped return, one output per opponent
+            # slot so no opponent's returns are fitted by another's
+            self.self_v = nn.Linear(hidden, n_context)
+            nn.init.orthogonal_(self.self_v.weight, 1.0)
+            nn.init.zeros_(self.self_v.bias)
+            self.resid = None
 
     def forward(self, local, scalar, context, priv, board,
                 team_self=None, team_foe=None, iteration=None, rnd=None):
@@ -141,6 +166,15 @@ class BoardCritic(nn.Module):
         which is the unknown encoding -- slot 0 or an all-zero encoding -- so a
         caller that does not know the matchup still gets a value.
         """
+        # A critic built before v8 (or for a v8-off env) declares n_phi = 0 and
+        # ignores the extra features; one built for v8 splits them off and never
+        # feeds Phi to the trunk, because it is added in closed form below and
+        # handing it to the trunk as well invites learning it twice.
+        phi = None
+        if self.n_phi:
+            phi = priv[:, self.n_priv:self.n_priv + self.n_phi]
+        priv = priv[:, :self.n_priv]
+
         b = self.board(board)
         n = self.near(local)
         z = torch.zeros(local.shape[0], device=local.device)
@@ -152,7 +186,14 @@ class BoardCritic(nn.Module):
         sr = sinusoidal(rnd if rnd is not None else z - 1, self.sin_dim)
         c = self.cond(torch.cat([priv, context, ts, tf, si, sr], dim=1))
         h = self.fuse(torch.cat([b, n, c, self.scalar(scalar)], dim=1))
-        v = (self.self_v(h) * context).sum(1)
+        if self.resid is not None:
+            # The sign is NOT a typo. Potential shaping is a loan: reaching a
+            # good position pays immediately, so the return still to collect is
+            # smaller by exactly Phi. Anchoring on +Phi would double the error
+            # instead of cancelling it. See REWARDS.md.
+            v = -phi.sum(1) + torch.tanh(self.resid(h)).squeeze(1)
+        else:
+            v = (self.self_v(h) * context).sum(1)
         return self.team(h), v
 
 

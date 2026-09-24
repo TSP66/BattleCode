@@ -65,7 +65,14 @@ def replay_teams() -> list[str]:
 
 
 TEAMS = replay_teams()
-N_PRIV = 8                                      # PRIV_COUNT in bc_vec.hpp
+# The BASE privileged features. The engine's row is wider than this under reward
+# v8 -- the extra entries are Phi's components -- and a critic that wants them
+# passes n_phi and the full row. Anything here that predates v8 slices to the
+# base width, which is why this is PRIV_BASE and not PRIV_COUNT.
+# Must equal bcsim.PRIV_BASE; kept as a literal because bcsim is imported
+# lazily here, after BCSIM_LIB is pinned to libbcvec_priv.so. Asserted in
+# extract_one, which does have bcsim in scope.
+N_PRIV = 8
 # class index -> value, in units of the terminal reward
 OUTCOME_VALUE = (1.0, 0.0, -1.0)                # win, draw, loss
 ROUND_BUCKETS = (0, 100, 200, 300, 400, 501)
@@ -126,6 +133,7 @@ def load(path: str, dev, n_context: int | None = None):
     size (it was never trained in pretraining)."""
     import torch
     import bcsim
+    assert N_PRIV == bcsim.PRIV_BASE, "N_PRIV is out of step with PRIV_BASE"
     ck = torch.load(path, map_location=dev, weights_only=False)
     c = ck["critic_args"]
     nc = n_context or c["n_context"]

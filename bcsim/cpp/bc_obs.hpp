@@ -159,6 +159,15 @@ inline void VecEnv::observe(Env& e, int index) {
         pv[5] = (float)fu / (float)m.unit_limit;
         pv[6] = (float)g.round / (float)cfg_.max_rounds;
         pv[7] = std::tanh((float)(tm - fm) / 10.0f);
+        // reward v8: Phi for this dragon's team, per component, as the reward
+        // banks it. Zero when v8 is off, so a critic trained without it sees a
+        // constant and is unaffected.
+        float phi[bc8::N_TERMS] = {0};
+        if (cfg_.reward_v8) {
+            bc8::potential(team_shape(e, d.team), team_shape(e, (uint8_t)(1 - d.team)),
+                           g.round, cfg_.max_rounds, m.area(), cfg_.v8, phi);
+        }
+        for (int k = 0; k < bc8::N_TERMS; k++) pv[PRIV_BASE + k] = phi[k];
     }
 
     if (b_board_) {

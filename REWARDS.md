@@ -638,6 +638,24 @@ inverted. The intra-group ratios are fixed.
   clamp `r, z, a` to `±2`.
 * Bank once per turn (`acc.banked_at == e.turn` guard at `bc_vec.hpp:623`),
   otherwise a discounted potential gains a spurious `(γ − 1)Φ` per double-bank.
+* **Prime every spawned dragon at Φ(s_0), not at its own first action.** The
+  v1–v7 `primed` flag only goes true *after* an agent's first move, which for v8
+  is too late: the first bank is then taken post-move, everything the team did
+  earlier in round 0 is never paid, and **the dragon's first action gets no
+  reward at all**. Because dragons act in index order the bias is systematic —
+  measured at −0.38 on `v8_len` per episode even in the decile with almost no
+  deaths. v8 therefore carries its own `v8_primed`, set at `begin_episode` with
+  `Φ(s_0)`, which is exactly 0 on a symmetric spawn. A split child still primes
+  on its own first turn: it did not exist before, so there is nothing earlier to
+  pay it for.
+* **The telescoping invariant is per agent, not per episode.** A dragon alive
+  from spawn to the end must receive v8 shaping summing to exactly zero at
+  `γ = 1`; measured worst case **1.47e-07** over 42 such dragons. Summing across
+  agents does *not* cancel and must not be asserted to — each agent has its own
+  chain, so the total is `Σ φ(each death) − Σ φ(each split child's birth)`, which
+  is around −0.5 on `v8_len` and tracks the death count (correlation −0.24, and
+  `v8_top3` is exactly 0.0000 in the fewest-deaths decile). I had this the wrong
+  way round first and the wrong test hid the priming bug above.
 * Φ is **not** zeroed when a dragon dies — a dead dragon keeps the team position
   it left behind, which is what pays a sacrifice for its trade. Carried over
   from v3 unchanged, and it is the reason a sacrifice is learnable at all.
@@ -648,26 +666,60 @@ inverted. The intra-group ratios are fixed.
 
 ## The critic follows from this
 
-Most of the return is now `Φ(s,t)`, and **Φ is an analytic function of privileged
-team state that we can compute exactly.** So build the critic as a residual
-around it:
+Most of the return is now analytic, and **Φ is a function of privileged team state
+that we can compute exactly.** Work out what the value function actually is:
 
 ```
-V(s) = Φ(s, t) + f_θ(s)
+V(s_t) = E[ sum_{k>=t} gamma^(k-t) R_k ]
+       = E[ sum gamma^(k-t) (gamma*Phi_{k+1} - Phi_k) ]  +  gamma^(T-t) * W * E[outcome]
+       = gamma^(T-t) Phi_T - Phi_t                       +  gamma^(T-t) * W * E[outcome]
 ```
 
-`f_θ` learns only what Φ does not already explain. The critic starts holding the
-right answer for the shaped component instead of rediscovering it from returns,
-which is precisely where the memorisation was happening. This is a bigger lever
-on the collapse than any λ choice, and it drops into `train/critic_net.py`
-alongside the counterfactual baseline above.
+and `Φ_T := 0`, so
 
-The normalisation helps here too, and by more than convenience. `Φ` and the
-terminal outcome now live on the same `[−1, 1]`, so `V` has a fixed known range
-for the whole game: a `tanh` output head is correct by construction, `f_θ` is a
-small correction to a quantity of size 1 rather than a quantity that drifts
-between 1.9 and 3.1, and the residual target has stationary scale. With the raw
-form, `f_θ` would have had to learn the `Σλ(t)` envelope as well as the game.
+```
+V(s_t) = -Phi(s_t)  +  gamma^(T-t) * W * E[outcome | s_t]
+```
+
+**The sign is negative.** An earlier draft of this section had `V = Φ + f_θ`,
+which is wrong and not harmlessly wrong: anchoring on `+Φ` would have made the
+critic's starting error *twice* the potential instead of zero. Verified
+numerically against a simulated episode; the residual is only the one-step offset
+from where the terminal reward lands.
+
+The reason it is negative is worth keeping in mind generally: **potential shaping
+is a loan.** Reaching a good position pays you immediately, and the remaining
+return is correspondingly smaller because the future payments hand the potential
+back. A state with high Φ has *less* left to collect.
+
+So build the critic as
+
+```
+V(s) = -Phi(s, t) + f_theta(s)
+```
+
+with `f_θ` learning only `γ^(T−t)·W·E[outcome]`. That term is **exactly a
+discounted expected result**, bounded in `[−1, 1]`, so:
+
+* a `tanh` output head is correct by construction, not a guess;
+* `f_θ` is learning "who is winning and how soon does it end", which is what a
+  critic should be learning, instead of also having to reconstruct every material
+  and coverage term that Φ already states exactly;
+* the critic starts holding the right answer for the whole shaped component. That
+  is where the memorisation was: under a sparse reward the critic had to bridge up
+  to 500 turns, and `(γλ)^500` is `1e-12`.
+
+Φ is supplied to the critic **by the engine, not recomputed in Python.** The five
+scaled components already exist in `add_team_delta`; emitting them as privileged
+features makes the anchor exact and leaves one implementation to keep correct. A
+second copy in torch would drift, and the drift would be invisible because it
+would look like ordinary critic error.
+
+The other half of the refactor is the **counterfactual baseline** — see the
+credit-assignment cost above. `V` is already conditioned on the acting dragon
+through the 7x7 window branch; what the advantage needs is for teammate noise to
+be subtracted rather than averaged over, which is the only non-rivalrous way to
+recover the variance a pure team reward gives up.
 
 ## Where it goes in the code
 

@@ -183,6 +183,9 @@ void bcv_set_env_opponent(void* p, int env_index, int team, int bot_kind, int fi
 }
 
 void bcv_set_potential_gamma(void* p, float g) { ((VecHandle*)p)->env->set_potential_gamma(g); }
+void bcv_set_reward_v8(void* p, int on, float kappa) {
+    ((VecHandle*)p)->env->set_reward_v8(on != 0, kappa);
+}
 
 int bcv_ep_cols() { return EP_COLS; }
 int bcv_bot_count() { return BOT_COUNT; }
