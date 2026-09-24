@@ -305,6 +305,72 @@ Implementation: `uint8_t visited[2][area]` in `Env` plus a running count, set
 when a head enters a tile. 8 KB per env at the 64×64 maximum, 8 MB at 1024 envs,
 O(1) per turn.
 
+### The honest limits of Φ_exp
+
+Three things, found by checking the portal case properly. The first is a bug in
+the schedule; the other two are inherent to potential shaping and are the reason
+`λ_exp` should not be trusted to produce exploration on its own.
+
+**1. A round-150 clock is map-size-blind — fixed.** Coverage saturates long before
+150 on small maps and nowhere near it on large ones:
+
+```
+ fresh tiles reachable by round 150, at ~3.5/round (5 dragons, 0.7 each)
+  11x11  area   121   ~100%   saturates early
+  16x16  area   256   ~100%   saturates early
+  32x16  area   512   ~100%   saturates early
+  25x25  area   625    84.0%
+  32x32  area  1024    51.3%
+  60x40  area  2400    21.9%  (schooltime)
+  64x64  area  4096    12.8%  (big_empty, help)
+```
+
+Five of the ten official maps still have most of the board unexplored when a clock
+at 150 switches the term off. So **`λ_exp` decays with the explored fraction, not
+the clock**: `λ_exp = 1.0 · (1 − max(C_0, C_E)/area)`. Self-scaling to map size,
+no magic round number. It makes `λ_exp` state-dependent, hence `Σλ` and the shares
+state-dependent too — that is safe (any function of state is a valid potential,
+and the spec already requires banking the fully evaluated value) but it does mean
+the share table below is read at a *coverage level*, not purely at a round.
+
+**2. It is a difference, so in self-play it mostly does nothing.**
+`Φ_exp = tanh(ε(C_0 − C_E))` pays for out-exploring the opponent, not for
+exploring:
+
+```
+  coverage lead   5 tiles -> +0.0250      100 tiles -> +0.4621
+  coverage lead  20 tiles -> +0.0997      200 tiles -> +0.7616
+```
+
+Two self-play copies explore alike, the lead stays small, and the term sits near
+zero. That is the price of keeping Φ antisymmetric, and it is not negotiable
+without giving up the zero-sum property.
+
+**3. The deep one: a potential cannot bias the asymptotic optimum at all.** That
+is the theorem we are relying on everywhere else. A decaying `λ_exp` on an
+accumulating quantity *refunds what it paid* — Φ_exp is driven back to zero as the
+weight decays, and only discounting stops the refund being exact:
+
+```
+  earn at r 30, refunded at r110: net +0.195 of face value  (20%)
+  earn at r 50, refunded at r130: net +0.184 of face value  (18%)
+  earn at r100, refunded at r145: net +0.094 of face value   (9%)
+```
+
+So `λ_exp` is **a credit-timing device, not an incentive.** It makes the credit
+that exploring eventually earns arrive immediately, which is worth a great deal
+early in training because it is what stops the critic having to bridge 500 turns —
+but it cannot make a trained policy prefer exploring. Nothing in a potential can.
+
+**If we want actual exploration pressure, it belongs in the entropy bonus**, which
+`train.py` already has (`--ent 0.01 --ent-end 0.003 --ent-half-life 1.5e9`), not in
+the reward. A non-potential exploration term would work too, and would also change
+the optimum and be gameable — which is why there isn't one.
+
+This applies to every λ, not just `λ_exp`: the schedules decide *when credit
+lands*, which strongly determines which local optimum training falls into, and do
+not decide what the optimal policy is. `W·outcome` decides that, alone.
+
 **Follow-up, not in v8:** a windowed variant where a tile stops counting `W`
 rounds after it was last visited, restoring the real value of re-checking stale
 ground (pearls respawn — `MemoryTracker` already tracks the respawn timer).
@@ -444,10 +510,13 @@ keeps 76% of it. Both of the cases named:
 * **Lining up a kill.** Costs ~0 in Φ now (nothing about position is in Φ), pays
   45× a pearl 3–5 rounds later, of which 76–89% reaches the setup move. Works
   comfortably at `λ = 0.95`.
-* **A portal jump that expands reach.** Moves Φ by *nothing at all* — no length,
-  no count, at most one coverage tile. It is reward-neutral, which is correct: we
-  do not want to pay for portal-jumping as such. Its value has to come from the
-  **critic** recognising the position, not from the reward.
+* **A portal jump that expands reach.** In the opening this is the coverage term's
+  best case, not a gap: a portal into unexplored ground pays through `Φ_exp` for
+  **every fresh tile on the far side**, which is a long run of payments, while a
+  portal back into known ground pays nothing. That is exactly the discrimination
+  we want, and better than a flat "portal bonus" would be. Past the point where
+  `λ_exp` is spent it is reward-neutral and the **critic** has to carry it — see
+  the honest limits of `Φ_exp` below.
 
 ### The honest gap
 
@@ -495,7 +564,7 @@ Round `t ∈ [0, 500]`, `s = t/500`.
 | `λ_len` | `0.2 + 0.8(1 − s)` | 1.00 | 0.80 | 0.60 | 0.40 | 0.20 | the dense early signal; hands over to `λ_win` |
 | `λ_top3` | `0.6 · clamp((s − 0.4)/0.6, 0, 1)` | 0 | 0 | 0.10 | 0.35 | 0.60 | "don't put all eggs in one basket" only matters once there is something to lose |
 | `λ_kill` | `0.8 (1 − s³)` | 0.80 | 0.79 | 0.70 | 0.46 | 0 | decent for most of the game, out at the end where `λ_win` says the same thing |
-| `λ_exp` | `1.0 · max(0, 1 − t/150)` | 1.00 | 0.17 | 0 | 0 | 0 | opening only |
+| `λ_exp` | `1.0 · (1 − max(C_0,C_E)/area)` | — | — | — | — | — | state-dependent: falls as the map gets known, so it scales itself to map size |
 | `κ` | constant | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 | shaping strength against the outcome |
 | `W` (terminal) | constant | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 | the only non-telescoping term |
 
@@ -512,9 +581,15 @@ read, and they say what the reward actually cares about at each stage of the gam
 
 Which is the draft's intent, made legible: the terminal win condition is a tenth
 of the reward on round 0 and two thirds of it at the end; exploration is a third
-of the opening and gone by 150; the finisher peaks mid-game and is switched off at
-the end where `λ_win` says the same thing; total length carries the early signal;
-resilience only appears once there is something to lose.
+of the opening; the finisher peaks mid-game and is switched off at the end where
+`λ_win` says the same thing; total length carries the early signal; resilience only
+appears once there is something to lose.
+
+The `exp` row is tabulated on the **old clock** (`1 − t/150`) so it can be compared
+with the other four. With the coverage-based decay it tracks the explored fraction
+instead, so it is spent by about round 40 on `arena` and still paying at round 300
+on `big_empty`. The other four rows keep their shapes and are renormalised by
+whatever `λ_exp` currently is.
 
 Two schedules in substance — one shaping ramp down (`λ_len`, `λ_exp`), one
 outcome ramp up (`λ_win`, `λ_top3`) — with `λ_kill` following the outcome ramp
@@ -613,7 +688,9 @@ them would break every saved run's log schema.
   `+0.0278` for a pearl on the leader, so **one tile ≈ 0.05 pearls** and a team of
   ~30 dragons each covering a tile pays a little over one pearl per turn. That
   seems right for an opening bonus, but it is one rollout-free calculation; check
-  the real coverage rate before trusting it.
+  the real coverage rate before trusting it. Note it is a *lead* of tiles that is
+  priced, not tiles covered, so the operating band in self-play is the small-lead
+  end: a 20-tile lead is only +0.0997.
 * Whether `λ_len` and the gated `z` inside `Φ_win` double-count enough to matter.
   They are deliberately redundant — dense early, gated late — but if the policy
   over-values total length in the midgame, `λ_len` is the knob.
