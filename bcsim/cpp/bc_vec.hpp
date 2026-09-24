@@ -92,7 +92,23 @@ enum RewardComp {
 };
 static_assert(bc8::N_TERMS == 5, "RW_V8_* must match bc8::Term");
 
-constexpr int MAX_MSGS = 4;
+// How many received payloads a row of the observation carries. The protocol
+// itself is unbounded -- BuildRoundBlock writes "NUM_MSGS <n>" then n lines,
+// and a dragon standing in a crowd can be hit by a ray from every direction of
+// every neighbour -- so any fixed width is the simulator's choice, not the
+// engine's. `Observation.num_msgs` carries the TRUE count, so a truncation can
+// never pass unnoticed the way the silent 32-bit cut did, and
+// tests/test_msg_transfer.py fails if the high-water mark ever reaches this.
+//
+// 16 was measured to be NOT enough: under a four-way broadcast, inboxes reached
+// 24 over 384,000 turns. No small bound is provable either -- every one of up to
+// 128 living dragons casts four rays, and nothing stops them all landing on the
+// same dragon -- so this is headroom over what is observed, not a proof.
+constexpr int MAX_MSGS = 64;
+// What SC_NUM_MSGS saturates at. Deliberately still 4: mybot/obs.hpp:255
+// saturates its own feature at 4, and every checkpoint was trained on that, so
+// widening the buffer must not move a column the nets already read.
+constexpr int NUM_MSGS_CAP = 4;
 // privileged critic features: our total / longest / units, theirs, round,
 // and the longest-dragon margin (see VecEnv::observe)
 // Privileged critic features. The first 8 are the original global summary; the
@@ -131,8 +147,27 @@ struct Action {
     int8_t n_steps;
     int8_t dirs[MAX_STEPS];  // 0 N, 1 E, 2 S, 3 W
     int16_t split_k;
-    int8_t send_sonar;
-    uint32_t sonar;
+    // Sonar, as the engine actually takes it: one ray per cardinal direction
+    // per turn, each carrying its own full 64-bit payload (see Reply in
+    // bc_text.hpp). `send_dirs` is a bitmask over N,E,S,W -- bit k casts
+    // sonar_dir[k]. Not gated on the declared protocol, because the engine
+    // accepts the directed form from a legacy sender too (bc_core.hpp).
+    //
+    // This replaced a single `int8_t send_sonar; uint32_t sonar;` pair, which
+    // could only ever cast along the dragon's own facing and silently cut every
+    // payload to 32 bits -- so no codec could deliver a parent's state to its
+    // child, whatever it encoded.
+    uint8_t send_dirs;
+    uint64_t sonar_dir[SONAR_DIRS];
+    // The protocol this dragon declares this turn, or 0 for "say nothing and
+    // keep what it had", exactly as Reply::protocol means it. Applied BEFORE the
+    // action, because a split copies the parent's protocol to the child.
+    //
+    // Without this the vec API had no way to say "speak protocol 3" except the
+    // global cfg_.sonar, which also forces a four-way broadcast -- so declaring
+    // the protocol and choosing what to say were impossible to separate, and a
+    // vec env driven alongside the engine diverged on the ECHOES line.
+    int8_t protocol;
 };
 
 inline char dir_char(int d) { return d == 0 ? 'N' : d == 1 ? 'E' : d == 2 ? 'S' : 'W'; }
@@ -377,11 +412,17 @@ public:
     }
 
     // ---- buffers the caller owns
-    void bind(float* local, float* scalar, uint32_t* msgs, uint8_t* mask,
+    void bind(float* local, float* scalar, uint64_t* msgs, uint8_t* mask,
               int64_t* uid, int32_t* dragon_id, int8_t* team, int32_t* round_out) {
         b_local_ = local; b_scalar_ = scalar; b_msgs_ = msgs; b_mask_ = mask;
         b_uid_ = uid; b_dragon_ = dragon_id; b_team_ = team; b_round_ = round_out;
     }
+
+    // Optional: the TRUE number of payloads the dragon was handed this turn,
+    // uncapped, one int32 per row. MAX_MSGS of them are copied into `msgs` and
+    // SC_NUM_MSGS saturates at NUM_MSGS_CAP, so this is the only place the raw
+    // count survives -- bind it and a truncation is visible instead of silent.
+    void bind_num_msgs(int32_t* n) { b_nmsgs_ = n; }
 
     // Optional: privileged global features per row (PRIV_COUNT floats), for a
     // critic that never ships. Nothing is written unless this is bound.
@@ -571,13 +612,33 @@ public:
         return n;
     }
 
+    // Splits from the last step, as (parent id, child id, k) triples. The codec
+    // needs the pairing -- an encoder is trained against the specific child its
+    // parent seeded -- and no other export reveals it: a child is just a new
+    // dragon id, indistinguishable from one that spawned.
+    int last_splits(int env_index, int32_t* out, int cap) const {
+        const Env& e = envs_[env_index];
+        int n = 0;
+        for (const Event& ev : e.game.events) {
+            if (ev.kind != EV_SPLIT) continue;
+            if (n < cap) {
+                out[3 * n] = ev.a;        // parent
+                out[3 * n + 1] = ev.b;    // child
+                out[3 * n + 2] = ev.c;    // segments the child took (Event: split(parent, child, k, -))
+            }
+            n++;
+        }
+        return n;
+    }
+
     static Action decode_for(const Dragon& d, int action_id) {
         Action a{};
         a.kind = 2;
         a.n_steps = 0;
         a.split_k = 0;
-        a.send_sonar = 0;
-        a.sonar = 0;
+        a.send_dirs = 0;
+        a.protocol = 0;
+        for (int k = 0; k < SONAR_DIRS; k++) a.sonar_dir[k] = 0ull;
         if (action_id < 0 || action_id >= CODEC_ACTIONS) return a;
         if (action_id < CODEC_MOVES) {
             int n, rest;
@@ -693,6 +754,9 @@ private:
         // would leave a child born this turn on the legacy protocol and unable
         // to receive a payload wider than 32 bits.
         if (cfg_.sonar) d.protocol = 3;
+        // An explicit declaration wins over the cfg_.sonar default, so a caller
+        // can drive one dragon on the legacy protocol while others speak 3.
+        if (a.protocol > 0) d.protocol = (uint8_t)a.protocol;
         if (a.kind == 0 && a.n_steps > 0) {
             char dirs[MAX_STEPS];
             const int n = a.n_steps > MAX_STEPS ? MAX_STEPS : a.n_steps;
@@ -703,15 +767,24 @@ private:
         } else {
             e.game.kill(di, DEATH_ACTION);
         }
-        if (a.send_sonar && e.game.dragons[di].alive) e.game.cast_sonar(di, a.sonar);
-        if (cfg_.sonar && e.game.dragons[di].alive) {
-            // Sensing, not an action: the echo comes back free, so there is no
-            // reason not to listen in every direction. The payload is still
-            // zero -- what a dragon should say is the codec's job. Both the echo
-            // and the message path are now byte-identical to the engine on every
-            // official map (tests/parity_sonar.py, three protocol regimes).
+        // Sonar is cast AFTER the action, which is what makes a parent able to
+        // seed its own child: split() has already created the child by here, and
+        // it inherits protocol 3, so a ray that reaches it delivers the full 64
+        // bits on the child's very first turn.
+        if (e.game.dragons[di].alive) {
             static const char DIR_OF[SONAR_DIRS] = {'N', 'E', 'S', 'W'};
-            for (int k = 0; k < SONAR_DIRS; k++) e.game.cast_sonar(di, DIR_OF[k], 0ull);
+            // Whatever the caller asked for explicitly.
+            for (int k = 0; k < SONAR_DIRS; k++)
+                if (a.send_dirs & (1u << k)) e.game.cast_sonar(di, DIR_OF[k], a.sonar_dir[k]);
+            // With cfg_.sonar the dragon also listens in every direction it did
+            // not already speak in. Sensing, not an action: the echo comes back
+            // free, so there is no reason not to. The filler payload is zero --
+            // what a dragon should SAY is the caller's job, and casting twice in
+            // one direction would double-count the echo against the engine.
+            if (cfg_.sonar)
+                for (int k = 0; k < SONAR_DIRS; k++)
+                    if (!(a.send_dirs & (1u << k)))
+                        e.game.cast_sonar(di, DIR_OF[k], 0ull);
         }
 
         ensure_agents(e);
@@ -1118,7 +1191,8 @@ private:
     float* b_wide_ = nullptr;
     float* b_local_ = nullptr;
     float* b_scalar_ = nullptr;
-    uint32_t* b_msgs_ = nullptr;
+    uint64_t* b_msgs_ = nullptr;
+    int32_t* b_nmsgs_ = nullptr;
     uint8_t* b_mask_ = nullptr;
     int64_t* b_uid_ = nullptr;
     int32_t* b_dragon_ = nullptr;

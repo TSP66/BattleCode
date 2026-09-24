@@ -76,8 +76,7 @@ def play(map_text: str, w: int, h: int, seed: int) -> dict:
         kind, n_steps = np.zeros(1, np.int8), np.ones(1, np.int8)
         dirs = np.zeros((1, 8), np.int8)
         dirs[0, 0] = DIRS.index(pick)
-        _, cl, _ = env.step_raw(kind, n_steps, dirs, np.zeros(1, np.int16),
-                                np.zeros(1, np.int8), np.zeros(1, np.uint32))
+        _, cl, _ = env.step_raw(kind, n_steps, dirs, np.zeros(1, np.int16))
         n_died = int(cl.comps[:, died].sum()) if len(cl.uid) else 0
         stats["deaths"] += n_died
         if seam:

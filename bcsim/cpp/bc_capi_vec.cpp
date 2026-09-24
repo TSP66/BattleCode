@@ -71,18 +71,31 @@ void bcv_destroy(void* p) {
     delete h;
 }
 
-void bcv_bind(void* p, float* local, float* scalar, unsigned int* msgs, unsigned char* mask,
-              long long* uid, int* dragon_id, signed char* team, int* round_out) {
-    ((VecHandle*)p)->env->bind(local, scalar, msgs, mask, (int64_t*)uid, (int32_t*)dragon_id,
-                               (int8_t*)team, (int32_t*)round_out);
+void bcv_bind(void* p, float* local, float* scalar, unsigned long long* msgs,
+              unsigned char* mask, long long* uid, int* dragon_id, signed char* team,
+              int* round_out) {
+    ((VecHandle*)p)->env->bind(local, scalar, (uint64_t*)msgs, mask, (int64_t*)uid,
+                               (int32_t*)dragon_id, (int8_t*)team, (int32_t*)round_out);
 }
 
 void bcv_reset(void* p) { ((VecHandle*)p)->env->reset(); }
 
 // Structured actions, one per env, as flat arrays.
+// `send_dirs` is one bitmask per env over {N,E,S,W}; `sonar` is SONAR_DIRS
+// payloads per env, at full 64-bit width. Both may be null for "cast nothing".
+static void set_sonar(Action& a, const unsigned char* send_dirs,
+                      const unsigned long long* sonar, const signed char* protocol,
+                      int i) {
+    a.send_dirs = send_dirs ? send_dirs[i] : 0u;
+    a.protocol = protocol ? protocol[i] : 0;
+    for (int k = 0; k < SONAR_DIRS; k++)
+        a.sonar_dir[k] = sonar ? sonar[(size_t)i * SONAR_DIRS + k] : 0ull;
+}
+
 void bcv_step(void* p, const signed char* kind, const signed char* n_steps,
               const signed char* dirs, const short* split_k,
-              const signed char* send_sonar, const unsigned int* sonar) {
+              const unsigned char* send_dirs, const unsigned long long* sonar,
+              const signed char* protocol) {
     auto* h = (VecHandle*)p;
     const int n = h->env->num_envs();
     for (int i = 0; i < n; i++) {
@@ -91,25 +104,26 @@ void bcv_step(void* p, const signed char* kind, const signed char* n_steps,
         a.n_steps = n_steps[i];
         memcpy(a.dirs, dirs + (size_t)i * MAX_STEPS, MAX_STEPS);
         a.split_k = split_k[i];
-        a.send_sonar = send_sonar[i];
-        a.sonar = sonar[i];
+        set_sonar(a, send_dirs, sonar, protocol, i);
     }
     h->env->step(h->actions.data());
 }
 
-// Codec actions: one id per env, plus the optional sonar payload.
-void bcv_step_codec(void* p, const int* action_ids, const signed char* send_sonar,
-                    const unsigned int* sonar) {
+// Codec actions: one id per env, plus the optional sonar payloads.
+void bcv_step_codec(void* p, const int* action_ids, const unsigned char* send_dirs,
+                    const unsigned long long* sonar, const signed char* protocol) {
     auto* h = (VecHandle*)p;
     const int n = h->env->num_envs();
     for (int i = 0; i < n; i++) {
         Action a = h->env->decode(i, action_ids[i]);
-        a.send_sonar = send_sonar ? send_sonar[i] : 0;
-        a.sonar = sonar ? sonar[i] : 0u;
+        set_sonar(a, send_dirs, sonar, protocol, i);
         h->actions[i] = a;
     }
     h->env->step(h->actions.data());
 }
+
+// The true, uncapped count of payloads handed to each acting dragon.
+void bcv_bind_num_msgs(void* p, int* n) { ((VecHandle*)p)->env->bind_num_msgs(n); }
 
 // Closed transitions from the last step: env index, uid, reward components, done.
 int bcv_closures(void* p, int* env_out, long long* uid_out, float* comps_out,
@@ -161,6 +175,9 @@ void bcv_probe(void* p, int env_index, int* out) {
 int bcv_last_deaths(void* p, int env_index, int* out, int cap) {
     return ((VecHandle*)p)->env->last_deaths(env_index, (int32_t*)out, cap);
 }
+int bcv_last_splits(void* p, int env_index, int* out, int cap) {
+    return ((VecHandle*)p)->env->last_splits(env_index, (int32_t*)out, cap);
+}
 int bcv_probe_fields() { return VecEnv::PROBE_FIELDS; }
 
 int bcv_acting_dragon(void* p, int env_index) {
@@ -201,6 +218,8 @@ void bcv_layout(int* out) {
     out[5] = RW_COUNT;
     out[6] = MAX_STEPS;
     out[7] = CODEC_MOVES;
+    out[8] = SONAR_DIRS;
+    out[9] = NUM_MSGS_CAP;
 }
 
 }  // extern "C"

@@ -506,9 +506,26 @@ struct Game {
         child.start = 0;
         child.len = k;
         {
-            const int16_t a = child.ring[0], b = child.ring[1];
-            char back = direction_between(m, a % m.w, a / m.w, b % m.w, b / m.w);
-            child.facing = opposite(back);
+            // Asked NECK to HEAD, which is the same question every body segment
+            // answers (direction_between(seg(i), seg(i-1)), i.e. toward the
+            // head), just applied to the head itself.
+            //
+            // NOT opposite(direction_between(head, neck)). The two agree only
+            // while exactly one direction connects the pair, and a portal edge
+            // can land you where an ordinary step also would. Measured on
+            // generated maps, where the engine gave a freshly split dragon:
+            //
+            //   head (15,6) neck (15,7): (15,7)->(15,6) connects by S and N,
+            //                            the engine faced it N
+            //   head (6,8)  neck (6,7):  (6,7)->(6,8)  connects by S and E,
+            //                            the engine faced it E
+            //
+            // Both are the FIRST of N,E,S,W, the same tie-break the body lines
+            // use -- resolving the reversed query instead picked the other one
+            // and disagreed. This was KNOWN_ISSUES #5.
+            const int16_t head = child.ring[0], neck = child.ring[1];
+            child.facing = direction_between(m, neck % m.w, neck / m.w,
+                                             head % m.w, head / m.w);
         }
         for (int i = 0; i < k; i++) parent.pop_back();
 

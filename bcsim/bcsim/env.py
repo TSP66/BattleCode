@@ -36,8 +36,8 @@ _lib.bcv_create.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_int), ctype
 _lib.bcv_destroy.argtypes = [ctypes.c_void_p]
 _lib.bcv_bind.argtypes = [ctypes.c_void_p] + [ctypes.c_void_p] * 8
 _lib.bcv_reset.argtypes = [ctypes.c_void_p]
-_lib.bcv_step.argtypes = [ctypes.c_void_p] + [ctypes.c_void_p] * 6
-_lib.bcv_step_codec.argtypes = [ctypes.c_void_p] + [ctypes.c_void_p] * 3
+_lib.bcv_step.argtypes = [ctypes.c_void_p] + [ctypes.c_void_p] * 7
+_lib.bcv_step_codec.argtypes = [ctypes.c_void_p] + [ctypes.c_void_p] * 4
 _lib.bcv_closures.argtypes = [ctypes.c_void_p] + [ctypes.c_void_p] * 4 + [ctypes.c_int]
 _lib.bcv_episodes.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
 _lib.bcv_layout.argtypes = [ctypes.c_void_p]
@@ -51,9 +51,13 @@ _lib.bcv_bot_count.restype = ctypes.c_int
 _lib.bcv_bot_name.restype = ctypes.c_char_p
 _lib.bcv_bot_name.argtypes = [ctypes.c_int]
 
-_layout = (ctypes.c_int * 8)()
+_layout = (ctypes.c_int * 10)()
 _lib.bcv_layout(_layout)
-N_CHANNELS, WINDOW, N_SCALARS, MAX_MSGS, N_ACTIONS, N_REWARD_COMPS, MAX_STEPS, N_MOVES = _layout
+(N_CHANNELS, WINDOW, N_SCALARS, MAX_MSGS, N_ACTIONS, N_REWARD_COMPS, MAX_STEPS,
+ N_MOVES, SONAR_DIRS, NUM_MSGS_CAP) = _layout
+if SONAR_DIRS <= 0:
+    raise RuntimeError(f"{_LIB_PATH.name} predates the 64-bit sonar payload; "
+                       "rebuild with `make -C bcsim`")
 
 # Privileged critic features. PRIV_BASE is the original global summary, and the
 # rest are reward v8's potential components for the acting dragon's team, emitted
@@ -136,7 +140,11 @@ def reward_vector(weights: dict[str, float] | None = None) -> np.ndarray:
 class Observation:
     local: np.ndarray      # (num_envs, C, 7, 7) float32
     scalar: np.ndarray     # (num_envs, S) float32
-    msgs: np.ndarray       # (num_envs, MAX_MSGS) uint32, raw sonar values
+    msgs: np.ndarray       # (num_envs, MAX_MSGS) uint64, raw sonar payloads
+    # (num_envs,) int32: how many payloads the dragon was really handed. The
+    # protocol is unbounded, so this may exceed MAX_MSGS -- in which case only
+    # the first MAX_MSGS are in `msgs`. Always check it rather than len(msgs).
+    num_msgs: np.ndarray
     mask: np.ndarray       # (num_envs, N_ACTIONS) uint8, 1 = allowed
     uid: np.ndarray        # (num_envs,) int64, identifies the acting agent
     dragon_id: np.ndarray  # (num_envs,) int32
@@ -207,7 +215,8 @@ class BattlecodeVecEnv:
 
         self._local = np.zeros((num_envs, N_CHANNELS, WINDOW, WINDOW), np.float32)
         self._scalar = np.zeros((num_envs, N_SCALARS), np.float32)
-        self._msgs = np.zeros((num_envs, MAX_MSGS), np.uint32)
+        self._msgs = np.zeros((num_envs, MAX_MSGS), np.uint64)
+        self._nmsgs = np.zeros(num_envs, np.int32)
         self._mask = np.zeros((num_envs, N_ACTIONS), np.uint8)
         self._uid = np.zeros(num_envs, np.int64)
         self._dragon = np.zeros(num_envs, np.int32)
@@ -216,6 +225,8 @@ class BattlecodeVecEnv:
         _lib.bcv_bind(ctypes.c_void_p(self._h), *[a.ctypes.data for a in
                       (self._local, self._scalar, self._msgs, self._mask,
                        self._uid, self._dragon, self._team, self._round)])
+        _lib.bcv_bind_num_msgs.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        _lib.bcv_bind_num_msgs(ctypes.c_void_p(self._h), self._nmsgs.ctypes.data)
         self._priv = None
         if privileged:
             # only newer builds have it; a plain run never looks the symbol up
@@ -267,8 +278,10 @@ class BattlecodeVecEnv:
         self._a_steps = np.zeros(num_envs, np.int8)
         self._a_dirs = np.zeros((num_envs, MAX_STEPS), np.int8)
         self._a_split = np.zeros(num_envs, np.int16)
-        self._a_send = np.zeros(num_envs, np.int8)
-        self._a_sonar = np.zeros(num_envs, np.uint32)
+        self._a_send = np.zeros(num_envs, np.uint8)
+        self._a_sonar = np.zeros((num_envs, SONAR_DIRS), np.uint64)
+        self._a_proto = np.zeros(num_envs, np.int8)
+        self._splits = np.zeros((64, 3), np.int32)
 
     # -------------------------------------------------- lifecycle
     def close(self) -> None:
@@ -284,8 +297,9 @@ class BattlecodeVecEnv:
         return self.observation()
 
     def observation(self) -> Observation:
-        return Observation(self._local, self._scalar, self._msgs, self._mask,
-                           self._uid, self._dragon, self._team, self._round, self._priv)
+        return Observation(self._local, self._scalar, self._msgs, self._nmsgs,
+                           self._mask, self._uid, self._dragon, self._team,
+                           self._round, self._priv)
 
     # -------------------------------------------------- configuration
     def set_map_weights(self, weights) -> None:
@@ -347,21 +361,60 @@ class BattlecodeVecEnv:
         _lib.bcv_set_env_opponent(ctypes.c_void_p(self._h), env_index, team, bot, map_index)
 
     # -------------------------------------------------- stepping
-    def step(self, action_ids: np.ndarray, send_sonar: np.ndarray | None = None,
-             sonar: np.ndarray | None = None) -> tuple[Observation, Closures, EpisodeStats]:
-        """Steps with codec action ids (see `codec.py` for what they mean)."""
+    def _sonar_args(self, send_dirs, sonar, protocol=None):
+        """Validates the per-direction sonar payloads and returns the two arrays
+        the C API wants. Shapes are checked rather than broadcast: the previous
+        API took one 32-bit value and cast it along the dragon's facing, so a
+        call written against it must fail loudly here instead of quietly meaning
+        "north only, low 32 bits"."""
+        if send_dirs is None:
+            send = self._a_send
+        else:
+            send = np.ascontiguousarray(send_dirs, np.uint8)
+            if send.shape != (self.num_envs,):
+                raise ValueError(
+                    f"send_dirs must be ({self.num_envs},) uint8 bitmasks over "
+                    f"N,E,S,W (bit k = direction k), got {send.shape}")
+        if sonar is None:
+            value = self._a_sonar
+        else:
+            value = np.ascontiguousarray(sonar, np.uint64)
+            if value.shape != (self.num_envs, SONAR_DIRS):
+                raise ValueError(
+                    f"sonar must be ({self.num_envs}, {SONAR_DIRS}) uint64, one "
+                    f"payload per direction, got {value.shape}")
+        if protocol is None:
+            proto = self._a_proto
+        else:
+            proto = np.ascontiguousarray(protocol, np.int8)
+            if proto.shape != (self.num_envs,):
+                raise ValueError(
+                    f"protocol must be ({self.num_envs},) int8, 0 to leave a "
+                    f"dragon's protocol alone, got {proto.shape}")
+        return send, value, proto
+
+    def step(self, action_ids: np.ndarray, send_dirs: np.ndarray | None = None,
+             sonar: np.ndarray | None = None,
+             protocol: np.ndarray | None = None) -> tuple[Observation, Closures, EpisodeStats]:
+        """Steps with codec action ids (see `codec.py` for what they mean).
+
+        `send_dirs[i]` is a bitmask over the four cardinal directions and
+        `sonar[i, k]` the full 64-bit payload cast in direction k. Sonar is
+        resolved after the action, so a dragon that splits this turn can seed
+        the child it just created.
+        """
         ids = np.ascontiguousarray(action_ids, dtype=np.int32)
         if ids.shape != (self.num_envs,):
             raise ValueError(f"expected {self.num_envs} actions, got {ids.shape}")
-        send = self._a_send if send_sonar is None else np.ascontiguousarray(send_sonar, np.int8)
-        value = self._a_sonar if sonar is None else np.ascontiguousarray(sonar, np.uint32)
+        send, value, proto = self._sonar_args(send_dirs, sonar, protocol)
         _lib.bcv_step_codec(ctypes.c_void_p(self._h), ids.ctypes.data,
-                            send.ctypes.data, value.ctypes.data)
+                            send.ctypes.data, value.ctypes.data, proto.ctypes.data)
         return self.observation(), self._closures(), self._episodes()
 
     def step_raw(self, kind: np.ndarray, n_steps: np.ndarray, dirs: np.ndarray,
-                 split_k: np.ndarray, send_sonar: np.ndarray | None = None,
-                 sonar: np.ndarray | None = None) -> tuple[Observation, Closures, EpisodeStats]:
+                 split_k: np.ndarray, send_dirs: np.ndarray | None = None,
+                 sonar: np.ndarray | None = None,
+                 protocol: np.ndarray | None = None) -> tuple[Observation, Closures, EpisodeStats]:
         """Steps with structured actions, for action spaces of your own design.
 
         kind: 0 move, 1 split, 2 suicide. dirs holds absolute directions
@@ -371,12 +424,30 @@ class BattlecodeVecEnv:
         np.copyto(self._a_steps, n_steps)
         np.copyto(self._a_dirs, dirs)
         np.copyto(self._a_split, split_k)
-        send = self._a_send if send_sonar is None else np.ascontiguousarray(send_sonar, np.int8)
-        value = self._a_sonar if sonar is None else np.ascontiguousarray(sonar, np.uint32)
+        send, value, proto = self._sonar_args(send_dirs, sonar, protocol)
         _lib.bcv_step(ctypes.c_void_p(self._h), self._a_kind.ctypes.data,
                       self._a_steps.ctypes.data, self._a_dirs.ctypes.data,
-                      self._a_split.ctypes.data, send.ctypes.data, value.ctypes.data)
+                      self._a_split.ctypes.data, send.ctypes.data, value.ctypes.data,
+                      proto.ctypes.data)
         return self.observation(), self._closures(), self._episodes()
+
+    def last_splits(self, env_index: int) -> np.ndarray:
+        """Splits in `env_index` during the last step, as (parent, child, k) rows.
+
+        A child is otherwise indistinguishable from a newly spawned dragon, so
+        this is the only way to know which newborn belongs to which parent --
+        which is what a parent-to-child codec has to be trained against.
+        """
+        _lib.bcv_last_splits.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                         ctypes.c_void_p, ctypes.c_int]
+        _lib.bcv_last_splits.restype = ctypes.c_int
+        n = _lib.bcv_last_splits(ctypes.c_void_p(self._h), env_index,
+                                 self._splits.ctypes.data, len(self._splits))
+        if n > len(self._splits):
+            self._splits = np.zeros((n, 3), np.int32)
+            n = _lib.bcv_last_splits(ctypes.c_void_p(self._h), env_index,
+                                     self._splits.ctypes.data, len(self._splits))
+        return self._splits[:n].copy()
 
     # -------------------------------------------------- results
     def _closures(self) -> Closures:

@@ -83,7 +83,7 @@ def label_game(game_json: pathlib.Path, out_dir: pathlib.Path, team_id: int) -> 
     obs = env.reset()
     z = lambda dt, *s: np.zeros((1,) + s, dt)
     kind, nst, dirs, split = z(np.int8), z(np.int8), z(np.int8, MAX_STEPS), z(np.int16)
-    send, value = z(np.int8), z(np.uint32)
+    send, value = z(np.uint8), z(np.uint64, bcsim.SONAR_DIRS)
     labels, cats, tcats, survives, ourlen, foelen = [], [], [], [], [], []
     probed = 0
     for i, t in enumerate(rp.turns):
@@ -123,8 +123,15 @@ def label_game(game_json: pathlib.Path, out_dir: pathlib.Path, team_id: int) -> 
         dirs[0] = 0
         dirs[0, :nst[0]] = t.dirs[:nst[0]]
         split[0] = t.split_k
-        send[0] = t.sonar is not None
-        value[0] = t.sonar or 0
+        # Every ray the dragon really cast, with its direction and full 64-bit
+        # payload. Reading only one 32-bit value along the facing (which this
+        # replaced) both truncated wide payloads and dropped every ray after the
+        # first, so a replayed game diverged from the one the engine played.
+        send[0] = 0
+        value[0] = 0
+        for _d, _v in t.sonars:
+            send[0] |= np.uint8(1 << _d)
+            value[0, _d] = _v
         obs, _, _ = env.step_raw(kind, nst, dirs, split, send, value)
     env.close()
     cats_a = np.array(cats, np.int8)

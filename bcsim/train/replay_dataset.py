@@ -96,7 +96,7 @@ def convert(game_json: pathlib.Path, out_dir: pathlib.Path, team_id: int) -> dic
     unrepresentable = 0
     z = lambda dt, *s: np.zeros((1,) + s, dt)
     kind, nst, dirs, split = z(np.int8), z(np.int8), z(np.int8, MAX_STEPS), z(np.int16)
-    send, value = z(np.int8), z(np.uint32)
+    send, value = z(np.uint8), z(np.uint64, bcsim.SONAR_DIRS)
 
     for i, t in enumerate(rp.turns):
         did, rnd = int(obs.dragon_id[0]), int(obs.round[0])
@@ -121,7 +121,9 @@ def convert(game_json: pathlib.Path, out_dir: pathlib.Path, team_id: int) -> dic
             # (bc_memory.hpp), but clone_cache.py's layout is the 14, and
             # clone_features.py rebuilds the remembered inputs from the planes
             keep["scalar"].append(obs.scalar[0, :N_BASE_SCALARS].copy())
-            keep["msgs"].append(obs.msgs[0].copy())
+            # the first four only: obs.msgs is MAX_MSGS wide now, and the
+            # clone cache keeps four (clone_cache.py's spec)
+            keep["msgs"].append(obs.msgs[0, :4].copy())
             keep["mask"].append(obs.mask[0].copy())
             keep["action"].append(a)
             keep["alt"].append(alt)
@@ -137,8 +139,15 @@ def convert(game_json: pathlib.Path, out_dir: pathlib.Path, team_id: int) -> dic
         dirs[0] = 0
         dirs[0, :nst[0]] = t.dirs[:nst[0]]
         split[0] = t.split_k
-        send[0] = t.sonar is not None
-        value[0] = t.sonar or 0
+        # Every ray the dragon really cast, with its direction and full 64-bit
+        # payload. Reading only one 32-bit value along the facing (which this
+        # replaced) both truncated wide payloads and dropped every ray after the
+        # first, so a replayed game diverged from the one the engine played.
+        send[0] = 0
+        value[0] = 0
+        for _d, _v in t.sonars:
+            send[0] |= np.uint8(1 << _d)
+            value[0, _d] = _v
         obs, _, eps = env.step_raw(kind, nst, dirs, split, send, value)
         if i == len(rp.turns) - 1:
             ep = eps.as_dicts()

@@ -62,8 +62,8 @@ def lockstep(map_text: str, rng: random.Random, steps_per_game: int = 10_000) ->
         n_steps = np.zeros(1, np.int8)
         dirs = np.zeros((1, 8), np.int8)
         split = np.zeros(1, np.int16)
-        send = np.zeros(1, np.int8)
-        sonar = np.zeros(1, np.uint32)
+        send = np.zeros(1, np.uint8)
+        sonar = np.zeros((1, bcsim.SONAR_DIRS), np.uint64)
 
         roll = rng.random()
         if roll < 0.04 and b.length >= 5:
@@ -80,10 +80,29 @@ def lockstep(map_text: str, rng: random.Random, steps_per_game: int = 10_000) ->
             for i, d in enumerate(picks):
                 dirs[0, i] = DIRS.index(d)
             text = "MOVE " + "".join(picks)
-        if rng.random() < 0.3:
-            send[0], sonar[0] = 1, rng.randrange(0, 2 ** 32)
-            text += f"\nSONAR {sonar[0]}"
-        env.step_raw(kind, n_steps, dirs, split, send, sonar)
+        # The directed protocol-3 form, with payloads that genuinely need all 64
+        # bits. Half are deliberately above 2^32, which is the case the observation
+        # used to cut: `msgs` was a uint32 buffer, so a wide payload arrived
+        # mangled and the assertion below could not see it. Every direction is
+        # cast independently, because the engine allows one ray per direction and
+        # the old single-value API could only ever speak along the facing.
+        for k in range(bcsim.SONAR_DIRS):
+            if rng.random() < 0.3:
+                wide = rng.random() < 0.5
+                sonar[0, k] = (rng.randrange(1 << 32, 1 << 64) if wide
+                               else rng.randrange(0, 1 << 32))
+                send[0] |= np.uint8(1 << k)
+                text += f"\nSONAR {DIRS[k]} {sonar[0, k]}"
+        # Declared every turn, as a real bot does: a receiver still on the legacy
+        # protocol has any payload over 32 bits dropped rather than truncated, so
+        # without this the wide half above would never be delivered at all.
+        text += "\nPROTOCOL 3"
+        # The same declaration through the vec API. The engine learns a dragon's
+        # protocol from its reply, so the simulator has to be told too, or it
+        # keeps the dragon on protocol 2 and omits the ECHOES line the engine
+        # sends -- which is exactly how this test caught the missing field.
+        proto = np.full(1, 3, np.int8)
+        env.step_raw(kind, n_steps, dirs, split, send, sonar, proto)
         return text + "\nENDTURN\n"
 
     game = OracleGame(map_text, bridge)
@@ -131,9 +150,20 @@ def check_observation(env, block_text: str) -> None:
     assert abs(scalar[bcsim.SCALARS.index("round")] - b.round / 500) < 1e-6
     assert scalar[bcsim.SCALARS.index("face_" + b.dir.lower())] == 1.0
     assert scalar[bcsim.SCALARS.index("team_b")] == (1.0 if my_team == "B" else 0.0)
-    assert abs(scalar[bcsim.SCALARS.index("num_msgs")] - min(len(b.msgs), bcsim.MAX_MSGS)) < 1e-6
+    # The feature saturates at NUM_MSGS_CAP (4, what mybot/obs.hpp uses), while
+    # the buffer is MAX_MSGS wide and `num_msgs` reports the true count.
+    assert abs(scalar[bcsim.SCALARS.index("num_msgs")]
+               - min(len(b.msgs), bcsim.NUM_MSGS_CAP)) < 1e-6
+    assert obs.num_msgs[0] == len(b.msgs), (
+        f"true message count {obs.num_msgs[0]} but the engine sent {len(b.msgs)}")
+    assert len(b.msgs) <= bcsim.MAX_MSGS, (
+        f"the engine delivered {len(b.msgs)} payloads, over MAX_MSGS "
+        f"{bcsim.MAX_MSGS}: raise it, the protocol has no cap")
     for i, value in enumerate(b.msgs[:bcsim.MAX_MSGS]):
-        assert obs.msgs[0, i] == value, "sonar payload"
+        # Exact equality on a uint64, which is the whole point: this compares
+        # against the value the engine itself printed in the round block.
+        assert int(obs.msgs[0, i]) == value, (
+            f"sonar payload {i}: ours {int(obs.msgs[0, i])}, engine {value}")
 
     # edges, in the dragon's own frame (egocentric is off in this test)
     for i, d in enumerate(DIRS):

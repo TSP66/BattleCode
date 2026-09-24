@@ -115,6 +115,10 @@ class Msg:
         s, t, _ = st
         return struct.unpack_from("<I", self.segs[s], 8 * t + byte)[0]
 
+    def u64(self, st, byte):
+        s, t, _ = st
+        return struct.unpack_from("<Q", self.segs[s], 8 * t + byte)[0]
+
     def bit(self, st, byte):
         s, t, _ = st
         return self.segs[s][8 * t + byte] & 1
@@ -138,7 +142,12 @@ class Turn:
     kind: int = -1              # 0 move, 1 split, 2 suicide, -1 no action given
     dirs: list[int] = field(default_factory=list)
     split_k: int = 0
-    sonar: int | None = None    # value sent, if it pinged
+    # Every ray this dragon cast, as (direction index 0..3 = N,E,S,W, payload).
+    # A turn may hold up to one per direction, and the payload is 64 bits wide.
+    # This replaced a single `sonar: int | None` read with u32 off the 32-bit
+    # legacy field, which both truncated the value and let a second ping in the
+    # same turn overwrite the first.
+    sonars: list[tuple[int, int]] = field(default_factory=list)
     head_after: tuple[int, int] | None = None
     died: str | None = None
 
@@ -186,9 +195,16 @@ def read(path) -> Replay:
             elif which == 1:
                 cur.split_k = m.i32(act, 4)
         elif name == "sonarPing" and body is not None:
-            if cur is not None and cur.dragon == m.i32(body, 0):
-                cur.sonar = m.u32(body, 8)
-            events.append((rnd, name, {"sender": m.i32(body, 0), "value": m.u32(body, 8)}))
+            sender = m.i32(body, 0)
+            # value64 at offset 16 superseded the 32-bit value at 8; older
+            # formats only filled the narrow one. Layout verified against the
+            # engine's own accessors, see tests/replay.py.
+            value = m.u64(body, 16) or m.u32(body, 8)
+            direction = m.u16(body, 4)
+            if cur is not None and cur.dragon == sender and direction < 4:
+                cur.sonars.append((direction, value))
+            events.append((rnd, name, {"sender": sender, "direction": direction,
+                                       "value": value}))
         elif name == "dragonUpdate" and body is not None:
             if cur is not None and cur.dragon == m.i32(body, 0):
                 cur.head_after = m.point(body, 0)
@@ -219,6 +235,8 @@ if __name__ == "__main__":
     print("action kinds:", collections.Counter(t.kind for t in r.turns))
     print("move lengths:", collections.Counter(len(t.dirs) for t in r.turns if t.kind == 0))
     print("split k:", collections.Counter(t.split_k for t in r.turns if t.kind == 1))
-    print("sonar:", sum(t.sonar is not None for t in r.turns))
+    print("sonar rays:", sum(len(t.sonars) for t in r.turns),
+          "turns that cast:", sum(1 for t in r.turns if t.sonars),
+          "wide payloads:", sum(1 for t in r.turns for _, v in t.sonars if v > 0xFFFFFFFF))
     for t in r.turns[:6]:
         print(t)

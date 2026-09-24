@@ -96,7 +96,10 @@ def main() -> None:
     print(f"{len(games)} games, {n:,} samples before filtering", flush=True)
 
     spec = {"local": (np.uint8, (23, 7, 7)), "scalar": (np.float32, (14,)),
-            "msgs": (np.uint32, (4,)), "mask": (np.uint8, (48,)),
+            # uint64: sonar payloads are 64 bits wide. Four slots is still
+            # plenty here -- msg_rows only decodes the first two, and this cache
+            # exists to imitate scraped bots, whose scheme fits in the low 32.
+            "msgs": (np.uint64, (4,)), "mask": (np.uint8, (48,)),
             "action": (np.int16, ()), "alt": (np.int16, ()), "dragon": (np.int32, ()),
             "round": (np.int16, ()), "game": (np.int32, ()), "won": (np.float32, ()),
             "keep": (np.bool_, ()), "sub_weight": (np.float32, ())}

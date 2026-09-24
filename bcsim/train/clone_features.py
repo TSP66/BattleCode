@@ -419,8 +419,13 @@ def msg(cache):
 
 def msg_rows(sc: np.ndarray, msgs: np.ndarray) -> np.ndarray:
     """msg for rows of scalars and raw sonar values (also used online)."""
-    m = msgs.astype(np.int64)
+    # uint64, not int64: sonar payloads are 64 bits wide, so anything with the
+    # top bit set would come out NEGATIVE as int64 and the shifts below would
+    # sign-extend. The legacy 0xbca scheme this decodes only ever used the low
+    # 32, but a real game's payloads are not bound by it.
+    m = np.asarray(msgs).astype(np.uint64)
     k = sc[:, 12].astype(np.int64)
+    u = np.uint64   # numpy needs the shift/mask operands to be uint64 too
     w, h = np.rint(sc[:, SC_MAP_W] * 64), np.rint(sc[:, SC_MAP_H] * 64)
     hx, hy = np.rint(sc[:, SC_HEAD_X] * w), np.rint(sc[:, SC_HEAD_Y] * h)
     f = np.argmax(sc[:, SC_FACE_N:SC_FACE_N + 4], 1)
@@ -428,15 +433,16 @@ def msg_rows(sc: np.ndarray, msgs: np.ndarray) -> np.ndarray:
     for j in range(2):
         v = m[:, j]
         has = k > j
-        tag = has & ((v >> 20) == 0xbca)
-        x, y = (v >> 14) & 0x3f, (v >> 8) & 0x3f
+        tag = has & ((v >> u(20)) == u(0xbca))
+        x = ((v >> u(14)) & u(0x3f)).astype(np.int64)
+        y = ((v >> u(8)) & u(0x3f)).astype(np.int64)
         dx = (x - hx + w // 2) % w - w // 2
         dy = (y - hy + h // 2) % h - h // 2
         ox = np.select([f == 0, f == 1, f == 2], [dx, dy, -dx], -dy)
         oy = np.select([f == 0, f == 1, f == 2], [dy, -dx, -dy], dx)
         out[:, 5 * j:5 * j + 5] = np.stack(
             [has, tag, np.where(tag, ox / 16, 0), np.where(tag, oy / 16, 0),
-             np.where(has, (v & 0xff) / 64, 0)], 1)
+             np.where(has, (v & u(0xff)).astype(np.int64) / 64, 0)], 1)
     return out
 
 

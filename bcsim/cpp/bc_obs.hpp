@@ -118,7 +118,11 @@ inline void VecEnv::observe(Env& e, int index) {
     sc[SC_HEAD_Y] = (float)hy / (float)m.h;
     sc[SC_MAP_W] = (float)m.w / 64.0f;
     sc[SC_MAP_H] = (float)m.h / 64.0f;
-    sc[SC_NUM_MSGS] = (float)std::min<size_t>(d.inbox.size(), MAX_MSGS);
+    // Saturates at NUM_MSGS_CAP (4), not at MAX_MSGS: mybot/obs.hpp saturates
+    // its own copy of this feature at 4, and widening the message buffer must
+    // not move a column every existing checkpoint was trained to read. The true
+    // count is reported separately, through bind_num_msgs.
+    sc[SC_NUM_MSGS] = (float)std::min<size_t>(d.inbox.size(), NUM_MSGS_CAP);
     sc[SC_TEAM_B] = d.team == 1 ? 1.0f : 0.0f;
 
     // the head's cell, then the remembered features -- in MemoryTracker's
@@ -140,9 +144,14 @@ inline void VecEnv::observe(Env& e, int index) {
     for (int k = 0; k < SONAR_ECHO_KINDS; k++)
         sc[SC_ECHO_AT + k] = (float)d.echo[k] / (float)SONAR_DIRS;
 
-    uint32_t* msgs = b_msgs_ + (size_t)index * MAX_MSGS;
+    // The payloads themselves, at full width. These were uint32 until the
+    // parent-to-child work: the inbox has always been uint64 and the engine
+    // delivers 64 bits to a protocol-3 dragon, so every payload above 2^32 was
+    // being cut here, at the last step before python could see it.
+    uint64_t* msgs = b_msgs_ + (size_t)index * MAX_MSGS;
     for (int i = 0; i < MAX_MSGS; i++)
-        msgs[i] = i < (int)d.inbox.size() ? d.inbox[i] : 0u;
+        msgs[i] = i < (int)d.inbox.size() ? d.inbox[i] : 0ull;
+    if (b_nmsgs_) b_nmsgs_[index] = (int32_t)d.inbox.size();
 
     if (b_priv_) {
         // what decides the game, which the 7x7 window cannot show: both

@@ -83,25 +83,36 @@ expected. That's within sampling noise at this size (two standard errors is
 about ±0.11), but if later mirror matches sit clearly below 0.5, look for a
 side (team A/B) bias in the eval setup or the maps.
 
-## 5. A split child's facing can differ from the engine on some geometry
+## 5. A split child's facing (FIXED 2026-09-24)
 
-- **What:** `bcsim/tests/stress.py` reports 2 block mismatches, both a body
-  line's **facing character** for a freshly split dragon:
-  `gen23/splitter_policy` dragon 134 turn 1622 (engine `N`, ours `S`) and
-  `gen78/splitter_policy` dragon 25 turn 337 (engine `E`, ours `S`).
-- **Not sonar.** Verified identical at commit `8f4376ad` before the sonar work,
-  so it predates it. Sonar parity is exact (SONAR.md).
-- **Impact:** the facing is one character of one body line in the observation, on
-  generated maps only; no official map has reproduced it. It would matter for
-  observation parity if it happens on a live map, so it is worth fixing before
-  relying on `seg_dir` for a split child.
-- **Lead, not yet verified:** `Game::split` in `bcsim/cpp/bc_core.hpp` derives the
-  child's facing from `opposite(direction_between(...))` over the first two
-  segments, and `direction_between` searches N, E, S, W and returns the *first*
-  direction that connects. That is ambiguous whenever two directions connect the
-  same pair of tiles. Wrap cannot cause it here (generated maps are at least 10 in
-  each dimension), but a **portal** can, and these maps carry several. Confirming
-  that means dumping the child's two segments at the failing turn.
+- **Was:** `bcsim/tests/stress.py` reported 2 block mismatches, both the facing
+  character of a freshly split dragon: `gen23/splitter_policy` dragon 134 turn
+  1622 (engine `N`, ours `S`) and `gen78/splitter_policy` dragon 25 turn 337
+  (engine `E`, ours `S`).
+- **Cause:** `Game::split` derived the child's facing as
+  `opposite(direction_between(head, neck))`. Those two forms agree only while
+  exactly one direction connects the pair of tiles, and a **portal** edge can
+  land you where an ordinary step also would. Instrumented at the failing
+  splits, the child's head/neck cells were:
+
+  | head | neck | connects by | engine faced |
+  |------|------|-------------|--------------|
+  | (15,6) | (15,7) | N and S | `N` |
+  | (6,8)  | (6,7)  | N and W | `E` |
+
+  So it was not a fixed search order and not "prefer the ordinary step" -- and
+  not the direction the dragon actually moved either, since `seg_dir` held `N`
+  in both. Asking the question the other way round, neck to head, resolves both:
+  `(15,7)->(15,6)` connects by S and N and the first of N,E,S,W is `N`;
+  `(6,7)->(6,8)` connects by S and E and the first is `E`.
+- **Fix:** the child's facing is now `direction_between(neck, head)`, which is
+  the same question every body segment already answers (toward the head), just
+  applied to the head. Changing `direction_between`'s own tie-break instead was
+  tried and rejected: it fixed these two and broke three body-segment
+  directions, where the engine does take the first match.
+- **Verified:** `stress.py` is green for the first time -- 336,105 turns, 0
+  mismatches -- with sonar parity, the engine seam, memory and wide-plane parity
+  all still exact.
 
 ## Checks that exist now
 
