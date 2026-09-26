@@ -60,6 +60,13 @@ def load_net(path: str | pathlib.Path, dev: torch.device) -> tuple[ActorCritic, 
     """
     ck = torch.load(path, map_location="cpu", weights_only=False)
     a = ck["args"]
+    if a.get("arch") == "lstm":
+        # train/lstm_net.py; plays through distill_lstm.LSTMGreedy, not greedy()
+        from train.lstm_net import LSTMPolicy
+        net = LSTMPolicy(**{k: a[k] for k in ("c1", "b1", "c2", "b2", "squeeze", "embed", "hidden", "layers")})
+        net.load_state_dict(ck["net"])
+        net.to(dev).eval()
+        return net, ck
     hidden = next(v for k, v in ck["net"].items() if k.endswith("fuse.0.weight")).shape[0]
     # The scalar width comes from the checkpoint, never from the env. The env's
     # row grows as features are appended (708 -> 713 with the sonar echoes) and
@@ -122,10 +129,13 @@ def greedy(net, dev, max_batch: int = 0):
     return act
 
 
-def _call(fn, obs, rows, wide=None):
+def _call(fn, obs, rows, wide=None, grid=None):
     """An act callable on the chosen rows. A stateful one (a policy with
     memory, see clone_eval.py) gets the whole observation and the row mask,
     since it has to know which dragon of which game each row is."""
+    if getattr(fn, "wants_grid", False):
+        # the LSTM policy (train/distill_lstm.py LSTMGreedy) reads the 14x14 grid
+        return fn.rows(obs, rows, grid)
     if getattr(fn, "stateful", False):
         # A recurrent policy needs the planes as well as the observation; an
         # older stateful one (clone_eval) does not, so it is asked.
@@ -156,6 +166,8 @@ def evaluate(learner, opponents: list[dict], maps: list[str], map_names: list[st
     n = len(layout)
     any_wide = any(getattr(f, "wants_wide", False)
                    for f in [learner] + [o.get("act") for o in opponents] if f is not None)
+    any_grid = any(getattr(f, "wants_grid", False)
+                   for f in [learner] + [o.get("act") for o in opponents] if f is not None)
     # sonar has to match what the learner was trained with, or its five echo
     # scalars arrive as zeros it has never seen. It is symmetric -- every dragon
     # in the env broadcasts -- so the frozen opponents also see a non-zero
@@ -168,7 +180,7 @@ def evaluate(learner, opponents: list[dict], maps: list[str], map_names: list[st
                          "ways; --sonar as well would only add a zero payload")
     env = bcsim.BattlecodeVecEnv(maps, num_envs=n, num_threads=threads, seed=seed,
                                  closure_capacity=max(8192, n * 160), wide=any_wide,
-                                 sonar=sonar)
+                                 sonar=sonar, grid=any_grid)
     learner_team = np.array([side for _, _, side in layout], np.int8)
     opp_of = np.array([o for o, _, _ in layout])
     for i, (o, mi, side) in enumerate(layout):
@@ -204,11 +216,11 @@ def evaluate(learner, opponents: list[dict], maps: list[str], map_names: list[st
         mine = obs.team == learner_team
         acts = np.zeros(n, np.int32)
         if mine.any():
-            acts[mine] = _call(learner, obs, mine, env.wide)
+            acts[mine] = _call(learner, obs, mine, env.wide, env.grid)
         for o in net_opps:
             rows = (~mine) & (opp_of == o)
             if rows.any():
-                acts[rows] = _call(opponents[o]["act"], obs, rows, env.wide)
+                acts[rows] = _call(opponents[o]["act"], obs, rows, env.wide, env.grid)
         # portal usage is only counted against bots: there every closure is the
         # learner's, whereas against a network both sides' turns close
         turns += mine & (done < per_side) & is_bot

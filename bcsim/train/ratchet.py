@@ -79,6 +79,14 @@ DEFAULT_LEAGUE = [
 
 
 # ------------------------------------------------------------------ gate
+
+def _is_lstm(path: str) -> bool:
+    """Whether a checkpoint is the LSTM policy, which trains through
+    ratchet_lstm_train.py (per-dragon state, 14x14 grid) instead of ratchet_train.py."""
+    import torch
+    return torch.load(path, map_location="cpu", weights_only=False)["args"].get("arch") == "lstm"
+
+
 def gate(a) -> None:
     """Plays the candidate against the anchor (repeated, for a big sample) and
     the league; writes a yardstick-style row with the anchor reps merged."""
@@ -97,18 +105,31 @@ def gate(a) -> None:
         specs += [(f"{ANCHOR}#{i}", a.anchor) for i in range(a.anchor_reps)]
     specs += league
     n_envs = len(specs) * len(maps) * 2 * max(1, a.games // 2)
-    net, _ = load_net(a.cand, dev)
+    net, cck = load_net(a.cand, dev)
+    lstm_any = [cck["args"].get("arch") == "lstm"]
+
+    def player(n_, ck_):
+        # an LSTM policy (train/lstm_net.py) keeps a state per dragon and reads the
+        # 14x14 grid, so it cannot go through greedy()
+        if ck_["args"].get("arch") == "lstm":
+            from train.distill_lstm import LSTMGreedy
+            return LSTMGreedy(n_, dev, n_envs)
+        return greedy(n_, dev)
+
     opps = []
     # a captured graph does not hold its network: keep every one alive here, or
     # a replay reads freed weights (illegal memory access)
     nets = [net]
     for name, path in specs:
-        onet, _ = load_net(path, dev)
+        onet, ock = load_net(path, dev)
         nets.append(onet)
-        opps.append({"name": name, "act": greedy(onet, dev), "path": path})
-    res = evaluate(greedy(net, dev), opps, maps, map_names, games=a.games,
+        lstm_any.append(ock["args"].get("arch") == "lstm")
+        opps.append({"name": name, "act": player(onet, ock), "path": path})
+    # the LSTM policies were trained with our sonar (four-way broadcast) and read
+    # its echoes, so any gate that includes one is played with sonar on
+    res = evaluate(player(net, cck), opps, maps, map_names, games=a.games,
                    threads=a.threads, seed=a.seed, max_seconds=a.max_seconds,
-                   memchan=a.memchan)
+                   memchan=a.memchan, sonar=any(lstm_any) and not a.memchan)
 
     # merge the anchor repeats into one opponent
     cells, summary = res["cells"], res["summary"]
@@ -204,12 +225,27 @@ class Supervisor:
         # when gen0 is promoted (see _promote), so it must stay "gen0"
         seed_tag = pathlib.Path(self.a.start).parent.name or pathlib.Path(self.a.start).stem
         self.s = {"gen": 1, "segment": 0, "anchor": str(a0), "anchor_name": f"gen0 ({seed_tag})",
-                  "anchor_scores": None, "league": [[n, str(p)] for n, p in DEFAULT_LEAGUE],
+                  "anchor_scores": None, "league": [[n, str(p)] for n, p in self.league0()],
                   "cand": None, "turns": 0, "lr": self.a.lr, "discards": 0,
                   "seed": 1, "failures": 0, "promotions": 0,
                   "memchan": bool(self.a.memchan)}
         self.save()
         self.say(f"new ratchet from {self.a.start}")
+
+    def league0(self) -> list:
+        """The league a NEW run starts with: --league-file (name=path per line, # comments)
+        or DEFAULT_LEAGUE. For an LSTM run the names must be the ones the v8 critic was
+        pretrained under (critic_v8 ids.json), since that is how members find their slot."""
+        f = getattr(self.a, "league_file", "")
+        if not f:
+            return DEFAULT_LEAGUE
+        out = []
+        for line in pathlib.Path(f).read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                n, _, p = line.partition("=")
+                out.append((n.strip(), pathlib.Path(p.strip())))
+        return out
 
     # -- subprocesses
     def call(self, args: list[str], log: pathlib.Path) -> int:
@@ -244,14 +280,38 @@ class Supervisor:
             time.sleep(30)
         return None
 
-    def weights(self) -> tuple[list[str], list[str], list[float]]:
+    def weights(self) -> tuple[list[str], list[str], list[float], float]:
         """Training opponents: the anchor plus the league, weighted to the
-        members the anchor scores worst against."""
+        members the anchor scores worst against; and the self-play share.
+
+        Self-play is --self-frac of the envs, plus, for every retired league
+        member, its even share of the rest (1/len(league) of 1 - --self-frac),
+        up to --self-frac-max: an opponent the anchor has outgrown hands its
+        games to self-play rather than to the members still in training."""
         sc = self.s["anchor_scores"] or {}
         names = [ANCHOR] + [n for n, _ in self.s["league"]]
         paths = [self.s["anchor"]] + [p for _, p in self.s["league"]]
         w = [max(1.0 - sc.get(n, 0.5), 0.15) ** 2 for n in names]
-        return names, paths, w
+        # Retired: a member the anchor already beats at --retire-at or better
+        # teaches nothing, so it gets no training games. It stays in the GATE, so
+        # a regression against it is still caught, and since the weights are
+        # recomputed from each new anchor's gate it comes back by itself if the
+        # score ever falls under the line. The anchor itself is never retired.
+        cut = getattr(self.a, "retire_at", 0.0) or 0.0
+        if cut > 0:
+            retired = [n for n in names[1:] if sc.get(n, 0.0) >= cut]
+            w = [0.0 if n in retired else x for n, x in zip(names, w)]
+            if retired:
+                self.say(f"retired from training (anchor scores >= {cut}): " + ", ".join(
+                    f"{n} {sc[n]:.2f}" for n in retired))
+            base = self.a.self_frac
+            n_league = max(len(names) - 1, 1)
+            self_frac = min(base + (1.0 - base) * len(retired) / n_league,
+                            max(base, getattr(self.a, "self_frac_max", base)))
+        else:
+            self_frac = self.a.self_frac
+        keep = [i for i, x in enumerate(w) if x > 0]
+        return [names[i] for i in keep], [paths[i] for i in keep], [w[i] for i in keep], self_frac
 
     def stop_requested(self) -> bool:
         if (self.run / "STOP").exists():
@@ -291,7 +351,7 @@ class Supervisor:
         final = cdir / "final.pt"
         if c.get("segment_done") == s["segment"] and final.exists():
             return "ok"
-        names, paths, w = self.weights()
+        names, paths, w, self_frac = self.weights()
         # per candidate: ones created before this was stored ran 50M segments
         target = (s["segment"] + 1) * c.get("seg_turns", 50_000_000)
         for attempt in range(3):
@@ -306,7 +366,11 @@ class Supervisor:
                 left = 1                          # one iteration still writes final.pt
             if latest.exists():
                 self.say(f"resuming from {latest} ({done / 1e6:.1f}M candidate turns done)")
-            args = [PY, "-u", "-m", "train.ratchet_train", "--init", init,
+            lstm = _is_lstm(s["anchor"])
+            lstm_extra = (["--start-name", self.a.start_name] if lstm and getattr(self.a, "start_name", "") else [])
+            if lstm and getattr(self.a, "ent", None) is not None:
+                lstm_extra += ["--ent", str(self.a.ent)]
+            args = [PY, "-u", "-m", "train.ratchet_lstm_train" if lstm else "train.ratchet_train", "--init", init,
                     "--teacher", s["anchor"], "--out", str(cdir),
                     "--log", str(self.run / "log.jsonl"), "--turns", str(left),
                     "--turn-base", str(c["turns_before_exp"] + done), "--gen", str(s["gen"]),
@@ -314,18 +378,18 @@ class Supervisor:
                     "--seed", str(s["seed"] * 1000 + s["segment"] * 10 + attempt),
                     "--opponents", ",".join(paths), "--opp-names", ",".join(names),
                     "--opp-weights", ",".join(f"{x:.4f}" for x in w),
-                    "--self-frac", str(self.a.self_frac), "--kl-coef", str(self.a.kl_coef),
-                    *(["--memchan"] if self.a.memchan else []),
+                    "--self-frac", f"{self_frac:.4f}", "--kl-coef", str(self.a.kl_coef),
+                    *(["--memchan"] if self.a.memchan and not lstm else []),
                     *(["--maps", self.a.train_maps] if self.a.train_maps else []),
                     *(["--live-maps", self.a.live_maps, "--live-share", str(self.a.live_share)]
                       if self.a.live_maps and self.a.live_share > 0 else []),
-                    "--explore", str(c.get("explore", 0.0))]
+                    *([] if lstm else ["--explore", str(c.get("explore", 0.0))]), *lstm_extra]
             if cont:
                 args.append("--continue")
             if final.exists():
                 final.unlink()                    # the previous segment's, kept as segN.pt
             self.say(f"train gen {s['gen']} segment {s['segment']} (attempt {attempt + 1}): "
-                     f"lr {s['lr']}, opponents " +
+                     f"lr {s['lr']}, self-play {self_frac:.2f}, opponents " +
                      ", ".join(f"{n} {x / sum(w):.2f}" for n, x in zip(names, w)))
             t0 = time.time()
             rc = self.call(args, self.run / "train.out")
@@ -349,11 +413,15 @@ class Supervisor:
         self.init_state()
         s = self.s
         if s["anchor_scores"] is None:
-            row = self.run_gate(s["anchor"], None, "gen0_baseline")
+            # a re-baseline (anchor_scores reset to null, e.g. after the gate maps
+            # change) must not reuse the first baseline's cached gate file
+            tag = "gen0_baseline" if s["gen"] <= 1 and s["promotions"] == 0 else f"{s['anchor_name']}_rebaseline"
+            row = self.run_gate(s["anchor"], None, tag)
             if row is None:
                 raise SystemExit("baseline gate failed three times")
             s["anchor_scores"] = {k: v["score"] for k, v in row["summary"].items()}
-            self.append("eval.jsonl", {**row, "total_turns": 0, "gen": 0, "kind": "baseline"})
+            self.append("eval.jsonl", {**row, "total_turns": s["turns"], "gen": s["gen"] if s["promotions"] else 0,
+                                       "kind": "baseline"})
             self.say("baseline: " + ", ".join(f"{k} {v:.3f}" for k, v in s["anchor_scores"].items()))
             self.save()
         while True:
@@ -469,7 +537,11 @@ def main() -> None:
     r.add_argument("--lr-min", type=float, default=7.5e-6)
     r.add_argument("--lr-patience", type=int, default=2)
     r.add_argument("--kl-coef", type=float, default=0.5)
-    r.add_argument("--self-frac", type=float, default=0.2)
+    r.add_argument("--self-frac", type=float, default=0.2, help="self-play share of envs, before retirements")
+    r.add_argument("--ent", type=float, default=None,
+                   help="LSTM runs: entropy bonus coefficient; unset = ratchet_lstm_train's default (0.001)")
+    r.add_argument("--self-frac-max", type=float, default=0.85,
+                   help="each retired league member adds its share of the rest to self-play, up to this")
     r.add_argument("--memchan", action="store_true",
                    help="train and gate with the team's shared map (train/memfeat.py). "
                         "Both halves get it or neither: it moves memfar, so a candidate "
@@ -488,6 +560,12 @@ def main() -> None:
     r.add_argument("--live-maps", default="", help="with --live-share, the maps to hold at that share")
     r.add_argument("--live-share", type=float, default=0.0, help="0 = every base map weighted equally")
     r.add_argument("--gate-maps", default="", help="maps the gate plays on; empty = the gate's default")
+    r.add_argument("--league-file", default="", help="NEW runs: the league, one name=path per line")
+    r.add_argument("--retire-at", type=float, default=0.8,
+                   help="a league member the anchor scores at least this against gets no training "
+                        "games (it stays in the gate); 0 = never")
+    r.add_argument("--start-name", default="", help="LSTM runs: the start policy's name in the v8 "
+                   "critic's league (critic_v8 ids.json), which seeds the learner's critic slot")
     g = sub.add_parser("gate")
     g.add_argument("--cand", required=True)
     g.add_argument("--anchor", default="")

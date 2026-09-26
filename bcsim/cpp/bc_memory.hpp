@@ -73,6 +73,46 @@ constexpr int N_WIDE = 2 * CH * CELLS;        // 2700
 constexpr int POOL = 4;                       // world cells a far cell averages, per axis
 }  // namespace wide_cfg
 
+// The LSTM policy's input (bcsim/train/lstm_net.py CHANNELS): a 14x14 grid in
+// the dragon's frame, head at row 7 col 7, rendered each turn from the memory
+// below. Static terrain and the decayed memory channels come from here; the
+// live 7x7, the self channels and the global planes are filled by bc_obs.hpp.
+// Decays are Q12-rounded (x4096) so the deployed int16 bot reproduces them.
+namespace grid_cfg {
+constexpr int G = 14, HALF = 7, CELLS = G * G;
+constexpr int CH = 38;
+constexpr int N = CH * CELLS;
+constexpr int AGE_CAP = 256;                   // older than this reads as 0
+enum : int {
+    KELP = 0, PORTAL = 4, NEVER_SPAWNS = 8,
+    PEARL = 9, PEARL_TIMER = 10, ALLY_HEAD = 11, ALLY_BODY = 12, ENEMY_HEAD = 13,
+    ENEMY_BODY = 14, SEG_DIR = 15,
+    SELF_BODY = 19, SELF_INDEX = 20, SELF_TAIL = 21,
+    SEEN = 22, PEARL_EXPECTED = 23, PEARL_TIMER_PROJ = 24, ENEMY_MEM = 25, ALLY_MEM = 26,
+    VISITED = 27,
+    ROUND = 28, LENGTH = 29, UNITS = 30, MAP_W = 31, MAP_H = 32, ECHO = 33,
+};
+}  // namespace grid_cfg
+
+struct GridDecay {
+    float seen[grid_cfg::AGE_CAP]{}, pearl[grid_cfg::AGE_CAP]{},
+          dragon[grid_cfg::AGE_CAP]{}, visit[grid_cfg::AGE_CAP]{};
+    GridDecay() {
+        auto q = [](double tau, int a) { return (float)(std::nearbyint(4096.0 * std::exp(-a / tau)) / 4096.0); };
+        for (int a = 0; a < grid_cfg::AGE_CAP; a++) {
+            seen[a] = q(32.0, a);
+            pearl[a] = q(64.0, a);
+            dragon[a] = q(8.0, a);
+            visit[a] = q(16.0, a);
+        }
+    }
+    static float at(float const* t, int age) {
+        return (unsigned)age < (unsigned)grid_cfg::AGE_CAP ? t[age] : 0.0f;
+    }
+};
+
+inline const GridDecay GRID_DECAY{};
+
 inline int mem_wrap(int v, int m) { return (v % m + m) % m; }
 
 // ego (row, col) of the 13x13 -> world offset, per facing. The same rotation
@@ -151,6 +191,11 @@ struct DragonMemory {
     // reads it: `mem` and `memfar` are the trainer's features and must not
     // change, so this costs the old inputs nothing.
     std::vector<std::int16_t> foe;
+    // For the 14x14 grid only, so mem, memfar and wide stay bit-identical:
+    // where an ally segment was last seen, and which sides of the cell carry
+    // an edge, in WORLD directions (bits 0-3 kelp N E S W, bits 4-7 portal).
+    std::vector<std::int16_t> ally;
+    std::vector<std::uint8_t> sides;
 
     static constexpr std::uint8_t PEARL = 1, KELP = 2;
 
@@ -163,6 +208,8 @@ struct DragonMemory {
         cd.assign(n, (std::int8_t)-1);
         flags.assign(n, 0);
         foe.assign(n, (std::int16_t)mem_cfg::NEVER);
+        ally.assign(n, (std::int16_t)mem_cfg::NEVER);
+        sides.assign(n, 0);
     }
 
     std::size_t at(int x, int y) const {
@@ -185,6 +232,40 @@ struct DragonMemory {
 
     // Separate from see() so the trainer's `mem` and `memfar` stay bit-identical.
     void saw_foe(int x, int y, int round) { foe[at(x, y)] = (std::int16_t)round; }
+    void saw_ally(int x, int y, int round) { ally[at(x, y)] = (std::int16_t)round; }
+    // Edges are terrain: whatever was seen on a side is what is there.
+    void see_sides(int x, int y, std::uint8_t bits) { sides[at(x, y)] = bits; }
+
+    // The grid's static-terrain (0-8) and memory (22-27) channels, into a
+    // zeroed grid_cfg::N buffer. Inside the live window these read this turn's
+    // values, since see() has already run for it.
+    void grid(int hx, int hy, int facing, int round, float* out) const {
+        using namespace grid_cfg;
+        auto ch = [&](int c, int cell) -> float& { return out[(std::size_t)c * CELLS + cell]; };
+        for (int row = 0; row < G; row++)
+            for (int col = 0; col < G; col++) {
+                int const cell = row * G + col;
+                int wx, wy;
+                mem_ego_to_world(facing, col - HALF, row - HALF, wx, wy);
+                std::size_t const k = at(hx + wx, hy + wy);
+                int const since = round - (int)visit[k];
+                if (visit[k] > mem_cfg::NEVER) ch(VISITED, cell) = GridDecay::at(GRID_DECAY.visit, since);
+                if (seen[k] <= mem_cfg::NEVER) continue;
+                int const age = round - (int)seen[k];
+                for (int d = 0; d < 4; d++) {          // ego side d is world side d + facing
+                    int const wd = (d + facing) & 3;
+                    // qualified: DragonMemory::KELP (a flag bit, 2) hides grid_cfg::KELP here
+                    if (sides[k] >> wd & 1) ch(grid_cfg::KELP + d, cell) = 1.0f;
+                    if (sides[k] >> (4 + wd) & 1) ch(grid_cfg::PORTAL + d, cell) = 1.0f;
+                }
+                if (cd[k] < 0) ch(NEVER_SPAWNS, cell) = 1.0f;
+                ch(SEEN, cell) = GridDecay::at(GRID_DECAY.seen, age);
+                if (expects_pearl(k, age)) ch(PEARL_EXPECTED, cell) = GridDecay::at(GRID_DECAY.pearl, age);
+                if (cd[k] >= 0) ch(PEARL_TIMER_PROJ, cell) = (float)std::max((int)cd[k] - age, 0) / 99.0f;
+                if (foe[k] > mem_cfg::NEVER) ch(ENEMY_MEM, cell) = GridDecay::at(GRID_DECAY.dragon, round - (int)foe[k]);
+                if (ally[k] > mem_cfg::NEVER) ch(ALLY_MEM, cell) = GridDecay::at(GRID_DECAY.dragon, round - (int)ally[k]);
+            }
+    }
 
     bool expects_pearl(std::size_t k, int age) const {
         return (flags[k] & PEARL) != 0 || (cd[k] >= 0 && (int)cd[k] <= age);

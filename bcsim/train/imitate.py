@@ -83,6 +83,9 @@ def main() -> None:
     p.add_argument("--holdout", type=float, default=0.1, help="share of games held out")
     p.add_argument("--games-per-chunk", type=int, default=40)
     p.add_argument("--val-cap", type=int, default=200_000, help="held-out samples used")
+    p.add_argument("--exclude-maps", default="",
+                   help="comma-separated server map ids whose games are left out entirely, so a "
+                        "map can be held out end to end (9 = Schooltime)")
     p.add_argument("--old-weight", type=float, default=0.25,
                    help="weight of games played by the team's older submissions; "
                         "the newest submission weighs 1")
@@ -100,6 +103,13 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     files = sorted(data.glob("*.npz"), key=lambda f: int(f.stem))
+    if a.exclude_maps:
+        drop = {int(x) for x in a.exclude_maps.split(",")}
+        map_of = {r["game"]: r.get("map") for r in
+                  map(json.loads, (data / "index.jsonl").read_text().splitlines())}
+        before = len(files)
+        files = [f for f in files if map_of.get(int(f.stem)) not in drop]
+        print(f"--exclude-maps {sorted(drop)}: {before - len(files)} of {before} games left out", flush=True)
     rng = np.random.default_rng(0)
     # the team's newest submission is the target; older versions still teach,
     # at a lower weight

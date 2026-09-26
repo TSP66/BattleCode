@@ -74,7 +74,7 @@ def down(cin: int, cout: int) -> nn.Sequential:
 class BoardCritic(nn.Module):
     def __init__(self, n_channels: int, n_scalars: int, n_context: int,
                  n_board_ch: int, board_side: int = 64, n_priv: int = 8,
-                 n_phi: int = 0,
+                 n_phi: int = 0, resid_scale: float = 1.0,
                  board_width: tuple[int, int, int] = (24, 48, 64),
                  board_blocks: tuple[int, int] = (2, 2),
                  near_width: int = 64, near_blocks: int = 4,
@@ -89,6 +89,12 @@ class BoardCritic(nn.Module):
         # analytically in forward(). n_priv counts the base features only, so a
         # critic saved before v8 existed loads unchanged and slices.
         self.n_phi = n_phi
+        # f_theta's bound. REWARDS.md derives |f_theta| <= 1, but measured on
+        # replays (2026-09-25, 31k positions) the residual return + Phi falls
+        # outside [-1, 1] on 0.66% of positions, out to ~2 -- a dragon that dies
+        # banks Phi at its death, which is not the survivor's derivation. 1
+        # keeps every earlier checkpoint as it was; the v8 critic uses 2.
+        self.resid_scale = resid_scale
         self.sin_dim = sin_dim
         w0, w1, w2 = board_width
         b1, b2 = board_blocks
@@ -191,7 +197,7 @@ class BoardCritic(nn.Module):
             # good position pays immediately, so the return still to collect is
             # smaller by exactly Phi. Anchoring on +Phi would double the error
             # instead of cancelling it. See REWARDS.md.
-            v = -phi.sum(1) + torch.tanh(self.resid(h)).squeeze(1)
+            v = -phi.sum(1) + self.resid_scale * torch.tanh(self.resid(h) / self.resid_scale).squeeze(1)
         else:
             v = (self.self_v(h) * context).sum(1)
         return self.team(h), v

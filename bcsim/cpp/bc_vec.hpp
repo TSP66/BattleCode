@@ -437,6 +437,8 @@ public:
     // stacked scales of six planes in the acting dragon's own frame
     // (bc_memory.hpp `wide`). The 708-scalar nets never ask for it.
     void bind_wide(float* wide) { b_wide_ = wide; }
+    // Optional: the LSTM policy's 38 x 14 x 14 grid (bc_memory.hpp grid_cfg).
+    void bind_grid(float* grid) { b_grid_ = grid; }
 
     void reset() {
         closures_.clear();
@@ -1189,6 +1191,7 @@ private:
     float* b_priv_ = nullptr;
     uint8_t* b_board_ = nullptr;
     float* b_wide_ = nullptr;
+    float* b_grid_ = nullptr;
     float* b_local_ = nullptr;
     float* b_scalar_ = nullptr;
     uint64_t* b_msgs_ = nullptr;

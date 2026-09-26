@@ -1,6 +1,6 @@
 MAP 48 24
 SYMMETRY xy
-MAP_NAME stronghold
+MAP_NAME Stronghold
 TILE_COUNT 1152
 TILE 0 0 0 0
 TILE 1 0 0 0

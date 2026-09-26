@@ -82,7 +82,10 @@ inline void VecEnv::observe(Env& e, int index) {
                 const Dragon& o = g.dragons[occ];
                 const bool head = g.head_at[t] != 0;
                 if (occ == di) at(head ? LC_SELF_HEAD : LC_SELF_BODY, row, col) = 1.0f;
-                else if (o.team == d.team) at(head ? LC_ALLY_HEAD : LC_ALLY_BODY, row, col) = 1.0f;
+                else if (o.team == d.team) {
+                    at(head ? LC_ALLY_HEAD : LC_ALLY_BODY, row, col) = 1.0f;
+                    dm.saw_ally(x, y, g.round);  // only the grid reads this
+                }
                 else {
                     at(head ? LC_ENEMY_HEAD : LC_ENEMY_BODY, row, col) = 1.0f;
                     dm.saw_foe(x, y, g.round);   // only the wide planes read this
@@ -93,15 +96,23 @@ inline void VecEnv::observe(Env& e, int index) {
             }
 
             bool kelp_here = false;
+            uint8_t sides = 0;                    // world directions, for the grid
             for (int o_dir = 0; o_dir < 4; o_dir++) {
                 const int world_dir = (o_dir + facing) % 4;
                 bool vertical; int ex, ey;
                 edge_on_side(m, x, y, dir_char(world_dir), vertical, ex, ey);
                 const int edge = m.idx(ex, ey);
                 const uint8_t kind = vertical ? m.v_kind[edge] : m.h_kind[edge];
-                if (kind == EDGE_KELP) { at(LC_KELP_N + o_dir, row, col) = 1.0f; kelp_here = true; }
-                else if (kind == EDGE_PORTAL) at(LC_PORTAL_N + o_dir, row, col) = 1.0f;
+                if (kind == EDGE_KELP) {
+                    at(LC_KELP_N + o_dir, row, col) = 1.0f;
+                    kelp_here = true;
+                    sides |= (uint8_t)(1 << world_dir);
+                } else if (kind == EDGE_PORTAL) {
+                    at(LC_PORTAL_N + o_dir, row, col) = 1.0f;
+                    sides |= (uint8_t)(1 << (4 + world_dir));
+                }
             }
+            dm.see_sides(x, y, sides);
             // MemoryTracker reads these three off the planes; taking them from
             // the same game values avoids a float round-trip and is identical
             dm.see(x, y, g.round, g.pearl[t] != 0, g.cd[t], kelp_here);
@@ -138,6 +149,53 @@ inline void VecEnv::observe(Env& e, int index) {
     if (b_wide_)
         dm.wide(hx, hy, dir_index(d.facing), g.round,
                 b_wide_ + (size_t)index * wide_cfg::N_WIDE);
+
+    // The LSTM policy's 38 x 14 x 14 grid (bc_memory.hpp grid_cfg). Bound only
+    // when something asks, so every other architecture pays nothing.
+    if (b_grid_) {
+        using namespace grid_cfg;
+        float* gr = b_grid_ + (size_t)index * grid_cfg::N;
+        memset(gr, 0, sizeof(float) * grid_cfg::N);
+        dm.grid(hx, hy, facing, g.round, gr);
+        auto gch = [&](int c, int r, int col) -> float& {
+            return gr[(size_t)c * grid_cfg::CELLS + r * grid_cfg::G + col];
+        };
+        // live: the window sits at rows/cols HALF-VISION .. HALF+VISION
+        static constexpr int LIVE[10][2] = {
+            {LC_PEARL, PEARL}, {LC_PEARL_TIME, PEARL_TIMER},
+            {LC_ALLY_HEAD, ALLY_HEAD}, {LC_ALLY_BODY, ALLY_BODY},
+            {LC_ENEMY_HEAD, ENEMY_HEAD}, {LC_ENEMY_BODY, ENEMY_BODY},
+            {LC_FACE_N, SEG_DIR}, {LC_FACE_E, SEG_DIR + 1}, {LC_FACE_S, SEG_DIR + 2}, {LC_FACE_W, SEG_DIR + 3}};
+        for (int row = 0; row < WINDOW; row++)
+            for (int col = 0; col < WINDOW; col++)
+                for (auto const& lv : LIVE)
+                    gch(lv[1], row + HALF - VISION, col + HALF - VISION) = at(lv[0], row, col);
+        // self: every segment the grid covers, not just the window's. The bot
+        // knows its own body from its own moves.
+        for (int i = 1; i < d.len; i++) {
+            const int16_t c = d.seg(i);
+            int ddx = c % m.w - hx, ddy = c / m.w - hy;
+            if (ddx > m.w / 2) ddx -= m.w;
+            if (ddx < -(m.w - 1) / 2) ddx += m.w;
+            if (ddy > m.h / 2) ddy -= m.h;
+            if (ddy < -(m.h - 1) / 2) ddy += m.h;
+            int ox, oy;
+            world_to_ego(facing, ddx, ddy, ox, oy);
+            if (ox < -HALF || ox >= G - HALF || oy < -HALF || oy >= G - HALF) continue;
+            gch(SELF_BODY, oy + HALF, ox + HALF) = 1.0f;
+            gch(SELF_INDEX, oy + HALF, ox + HALF) = (float)i / (float)std::max(1, d.len - 1);
+            if (i == d.len - 1) gch(SELF_TAIL, oy + HALF, ox + HALF) = 1.0f;
+        }
+        const float glob[10] = {
+            (float)g.round / (float)cfg_.max_rounds, std::min(d.len, 64) / 64.0f,
+            (float)g.alive[d.team] / (float)m.unit_limit, (float)m.w / 64.0f, (float)m.h / 64.0f,
+            (float)d.echo[0] / SONAR_DIRS, (float)d.echo[1] / SONAR_DIRS, (float)d.echo[2] / SONAR_DIRS,
+            (float)d.echo[3] / SONAR_DIRS, (float)d.echo[4] / SONAR_DIRS};
+        for (int k = 0; k < 10; k++) {
+            float* p = gr + (size_t)(ROUND + k) * grid_cfg::CELLS;
+            for (int i = 0; i < grid_cfg::CELLS; i++) p[i] = glob[k];
+        }
+    }
 
     // What this dragon's own sonars came back with last turn. Zero throughout
     // unless the env was built with sonar on, because nothing is cast then.

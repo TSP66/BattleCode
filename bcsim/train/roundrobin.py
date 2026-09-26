@@ -56,6 +56,9 @@ def parse() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=12345)
     p.add_argument("--max-seconds", type=float, default=3600.0, help="per row")
     p.add_argument("--out", default="", help="write the full result as json here")
+    p.add_argument("--sonar", action="store_true",
+                   help="every dragon broadcasts four ways (protocol 3). Required for the LSTM "
+                        "policies, which read echo planes; applies to every game")
     return p.parse_args()
 
 
@@ -141,7 +144,10 @@ def main() -> None:
     acts, archs = {}, {}
     for name, path in agents:
         net, ck = load_net(path, dev)
-        if getattr(net, "recurrent", False):
+        if ck["args"].get("arch") == "lstm":
+            from train.distill_lstm import LSTMGreedy
+            acts[name] = LSTMGreedy(net, dev, n_envs)
+        elif getattr(net, "recurrent", False):
             # a recurrent policy cannot go through greedy; it keeps a state per
             # dragon and implements evaluate's stateful contract instead
             from train.recurrent import RecurrentGreedy
@@ -161,7 +167,7 @@ def main() -> None:
         opps = [{"name": m, "act": acts[m]} for _, m in others]
         res = evaluate(acts[name], opps, maps, map_names, games=a.games,
                        threads=a.threads, seed=a.seed + i,
-                       max_seconds=a.max_seconds, progress=120)
+                       max_seconds=a.max_seconds, progress=120, sonar=a.sonar)
         cells[name] = res["summary"]
         line = []
         for j, m in others:
@@ -205,7 +211,7 @@ def main() -> None:
             "agents": [{"name": n, "path": str(p), "arch": archs[n]} for n, p in agents],
             "games": games.tolist(), "wins": wins.tolist(),
             "strength": strength.tolist(), "cells": cells,
-            "maps": map_names, "games_per_cell": a.games,
+            "maps": map_names, "games_per_cell": a.games, "sonar": a.sonar,
             "seconds": round(time.perf_counter() - t0, 1),
         }, indent=1))
         print(f"wrote {a.out}")

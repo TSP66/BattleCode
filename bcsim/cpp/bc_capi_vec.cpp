@@ -64,6 +64,8 @@ void bcv_board_shape(int* out) { out[0] = BOARD_CH; out[1] = BOARD_MAX; }
 
 void bcv_bind_wide(void* p, float* wide) { ((VecHandle*)p)->env->bind_wide(wide); }
 void bcv_wide_shape(int* out) { out[0] = 2 * wide_cfg::CH; out[1] = wide_cfg::SIDE; }
+void bcv_bind_grid(void* p, float* grid) { ((VecHandle*)p)->env->bind_grid(grid); }
+void bcv_grid_shape(int* out) { out[0] = grid_cfg::CH; out[1] = grid_cfg::G; }
 
 void bcv_destroy(void* p) {
     auto* h = (VecHandle*)p;

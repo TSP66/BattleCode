@@ -1,5 +1,28 @@
 # Submitting a bot
 
+## The LSTM bot (lstmbot/, v15 onward)
+
+LSTM checkpoints (`train/lstm_net.py`, `args.arch == "lstm"`) ship as `lstmbot/`, not `mybot/`. One command:
+
+```bash
+wasmprobe/submit_lstm.sh runs/ratchet_v8_sab/anchors/gen3.pt "what changed"
+CHECK_ONLY=1 wasmprobe/submit_lstm.sh <ckpt> x      # every gate, no upload
+```
+
+It exports into `lstmbot/weights.hpp` (`train.export_lstm`), then gates: zip < 3.9 MB; `parity_lstm.py` (grid,
+legal-move mask, logits and argmax against the simulator and the checkpoint, int32 accumulator headroom);
+three full games under `unswbc run --sandbox`, which since unswbc 1.0.0 builds C++ with the **judge's own clang
+and flags** and meters every turn with the judge's cost table (so `meter_bot.sh`/zig are no longer the
+reference for this bot). Then it uploads and records the version in `runs/submitted/`.
+
+Numerics: int16 weights (12 bits per output row), grid Q12, activations between layers **Q10 (+-32)**. The first
+port used Q12 activations, whose +-8 clip hit residual activations of up to ~18 and moved logits by up to 3.4
+(p99 1.5); Q10 brings the bot to p99 0.067 against PyTorch, below the bf16 noise the evaluations ran with.
+Cost for gen3 (2026-09-25), 140k turns over 11 maps in the judge sandbox: p50 79.4M, max 82.7M points a turn.
+`train/quant_eval.py` measures what the int16 numerics cost in play (fp32 vs the emulated bot, CPU).
+
+## The flat bot (mybot/)
+
 Submissions are **C++ only**. The bot is `mybot/` (`main.cpp`, `obs.hpp`, `memory.hpp`, `net.hpp`, `helper.hpp`, `weights_data.hpp`).
 Every step runs from the repo root. `wasmprobe/submit.sh` wraps steps 1-4 with the full `check_bot.sh` gate — prefer it.
 

@@ -187,7 +187,7 @@ class BattlecodeVecEnv:
                  seed: int = 0, egocentric: bool = True, random_pearl_seed: bool = True,
                  max_rounds: int = 500, closure_capacity: int | None = None,
                  privileged: bool = False, board: bool = False, wide: bool = False,
-                 sonar: bool = False):
+                 sonar: bool = False, grid: bool = False):
         if not maps:
             raise ValueError("need at least one map")
         blob = b"".join(m.encode() for m in maps)
@@ -249,6 +249,17 @@ class BattlecodeVecEnv:
             _lib.bcv_bind_board.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
             self.board = np.zeros((num_envs, shape[0], shape[1], shape[1]), np.uint8)
             _lib.bcv_bind_board(ctypes.c_void_p(self._h), self.board.ctypes.data)
+        self.grid = None
+        if grid:
+            # (num_envs, 38, 14, 14): the LSTM policy's input, in the dragon's
+            # frame (cpp/bc_memory.hpp grid_cfg, train/lstm_net.py CHANNELS)
+            if not hasattr(_lib, "bcv_bind_grid"):
+                raise RuntimeError(f"{_LIB_PATH.name} has no grid export; rebuild with `make -C bcsim`")
+            shape = (ctypes.c_int * 2)()
+            _lib.bcv_grid_shape(shape)
+            _lib.bcv_bind_grid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            self.grid = np.zeros((num_envs, shape[0], shape[1], shape[1]), np.float32)
+            _lib.bcv_bind_grid(ctypes.c_void_p(self._h), self.grid.ctypes.data)
         self.wide = None
         if wide:
             # (num_envs, 2 * CH, SIDE, SIDE) float32: the remembered map as

@@ -8,3 +8,10 @@
 {"version": "v12", "name": "ft_control-best", "ckpt": "runs/submitted/v12.pt", "source": "/Users/thomaspetty/Documents/BattleCode/runs/i2/ft_control/best.pt", "time": "2026-09-23T09:04"}
 {"version": "v13", "name": "sponge_2110-best", "ckpt": "runs/submitted/v13.pt", "source": "/home/thomaspetty/BattleCode/runs/i2/sponge_2110/best.pt", "time": "2026-09-23T12:07"}
 {"version": "v14", "name": "g002_s2-seg2", "ckpt": "runs/submitted/v14.pt", "source": "/home/thomaspetty/BattleCode/runs/ratchet4/cands/g002_s2/seg2.pt", "time": "2026-09-23T23:13"}
+{"version": "v15", "name": "ratchet_v8_sab-gen3", "ckpt": "runs/submitted/v15.pt", "source": "/home/thomaspetty/BattleCode/runs/ratchet_v8_sab/anchors/gen3.pt", "bot": "lstmbot", "time": "2026-09-25T21:40"}
+{"version": "v16", "name": "ratchet_v8_sab-gen4", "ckpt": "runs/submitted/v16.pt", "source": "/home/thomaspetty/BattleCode/runs/ratchet_v8_sab/anchors/gen4.pt", "bot": "lstmbot", "time": "2026-09-26T03:56"}
+{"version": "v17", "name": "ratchet_v8_sab-gen5", "ckpt": "runs/submitted/v17.pt", "source": "/home/thomaspetty/BattleCode/runs/ratchet_v8_sab/anchors/gen5.pt", "bot": "lstmbot", "time": "2026-09-26T07:10"}
+{"version": "v18", "name": "ratchet_v8_sab-gen6", "ckpt": "runs/submitted/v18.pt", "source": "/home/thomaspetty/BattleCode/runs/ratchet_v8_sab/anchors/gen6.pt", "bot": "lstmbot", "time": "2026-09-26T10:25"}
+{"version": "v19", "name": "ratchet_v8_sab-gen7", "ckpt": "runs/submitted/v19.pt", "source": "/home/thomaspetty/BattleCode/runs/ratchet_v8_sab/anchors/gen7.pt", "bot": "lstmbot", "time": "2026-09-26T13:38"}
+{"version": "v20", "name": "ratchet_v8_sab-gen8", "ckpt": "runs/submitted/v20.pt", "source": "/home/thomaspetty/BattleCode/runs/ratchet_v8_sab/anchors/gen8.pt", "bot": "lstmbot", "time": "2026-09-26T16:52"}
+{"version": "v21", "name": "ratchet_v8_sab-gen9", "ckpt": "runs/submitted/v21.pt", "source": "/home/thomaspetty/BattleCode/runs/ratchet_v8_sab/anchors/gen9.pt", "bot": "lstmbot", "time": "2026-09-26T20:06"}
