@@ -5,6 +5,48 @@ copy of the game engine (about 13.5B dragon-turns) and shipped as a C++ bot with
 
 ## How it was trained
 
+### The policy and its inputs
+
+Each dragon decides on its own, from what it can see, what it remembers and what its teammates told it
+over sonar. There is no central controller. The network is a small CNN followed by an MLP:
+
+```
+15x15x54 grid ─ conv 48 ─ resblock ─ stride-2 conv 112 ─ 2 resblocks ─ 1x1 squeeze 16 ─ dense 256 ┐
+previous action (76-way embedding, 48) ──────────────────────────────────────────────────────────┤
+scalars 5 + identity 3 + action history 75 + temperature 2 ─────────────────────────────────────┴─ MLP 128 ─ 128 ─ 75 actions
+```
+
+**CNN input:** 54 planes on a 15×15 grid centred on the head and rotated to the dragon's facing.
+
+| Group | Planes |
+|---|---|
+| Terrain (remembered once seen) | Kelp on each of the 4 edges, portal on each of the 4 edges, tiles that never spawn pearls |
+| Live 7×7 view | Pearl, pearl timer, ally head/body, enemy head/body, which way each segment points (4) |
+| Self (exact across the grid) | Own body, segment index, tail |
+| Decaying memory | Tile last seen (e^(−age/32)), pearl expected, projected pearl timer, enemies and allies last seen (e^(−age/8)), tiles visited (e^(−age/16)) |
+| Global (constant planes) | Round, own length, units alive, map width and height |
+| Sonar echoes | Fraction of rays hitting kelp, ally, ally head, enemy, enemy head |
+| Teammate reports (sonar v2) | Each nearby ally's length, drawn at its head |
+| Portal reports | What lies through each known portal: known, closed room, room size, pearls (fading with age) |
+| Queens | Am I the queen; ally/enemy queen in view; both queens' last known place (decaying); each queen's offset and freshness |
+
+The board wraps around (maps are tori), and every plane is drawn that way.
+
+**Straight into the MLP, not the CNN.** Some inputs are single numbers, and painting them as constant
+planes made the CNN do pointless work. These go into the first dense layer instead. Each was added mid-run
+as zero-initialised columns, so the network's output didn't change at the moment it was added:
+
+| Input | What |
+|---|---|
+| Previous action | Learned 48-dim embedding of the last action (75 actions + "none") |
+| Scalars (5) | round/500, (round/500)², length/64, (units alive/limit)², is-queen |
+| Identity (3) | Birth round/500, sin(id/7), sin(id/43), so otherwise identical dragons can take on different roles |
+| Action history (75) | Decayed count of each own action before the last one (½, ¼, …) |
+| Temperature (2) | T and √T, see below |
+
+**Actions (75):** moves, 2- and 3-step sprints, splits, self-kill, and 24 "far sprints" that reach any
+tile 4–6 steps away in the 7×7 window in one action.
+
 ### Ratchet: training in gated generations
 
 Plain PPO kept finding gains and then losing them, so training runs as a **ratchet**:
@@ -32,8 +74,27 @@ submitted automatically.
 - **Entropy** bonus 0.015 → 0 over 6B turns, later reset to 0.005 → 0. It is weighted by sampling
   temperature like the policy loss. Without that weighting, cold rows got up to 4× the bonus and entropy
   stopped falling.
-- The policy is **temperature-conditioned**. In training it samples at T ~ U[0.1, top], with top
-  0.5 → 0.35, and the gate plays greedy.
+
+### Temperature: one policy, trained at many temperatures
+
+The policy is **conditioned on its own sampling temperature**. T and √T are fed into its first dense
+layer, and it samples from softmax(logits / T). Every game draws a fresh temperature for each team, so
+one network learns to play across the whole range instead of one fixed noise level:
+
+| Who | Temperature per game |
+|---|---|
+| Learner | T ~ U[0.1, top], with top 0.5 → 0.35 over the run (mean ≈ 0.23 at the end) |
+| League opponents (past versions) | 10% fully greedy (T = 0), otherwise T ~ U[0, 0.4] (mean ≈ 0.18) |
+| Gate and the shipped bot | Greedy (temperature folded in at 0.1) |
+
+**The learner deliberately runs warmer than its opponents.** Its average temperature is higher, so it
+explores more, while the opponents play sharper and closer to their best. It is trained against harder
+versions of each opponent than it would meet at equal temperature. Every greedy gate game is the fair
+comparison.
+
+The PPO policy loss and the entropy bonus are both weighted by T / 0.4. At temperature T, the gradient with
+respect to the logits scales as 1/T. Without the weight, cold rows would dominate the update and get up to
+4× the entropy bonus.
 
 ### Reward: team potential first, then pure win/loss
 
