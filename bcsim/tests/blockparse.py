@@ -65,7 +65,6 @@ class Block:
         """Directions that are not certain death, judged only from what the
         dragon can see: no kelp, and no dragon segment on the far side."""
         out = []
-        hx, hy = self.head
         for d, (dx, dy) in STEP.items():
             symbol = self.edge(d)
             if symbol == "w":
@@ -73,14 +72,8 @@ class Block:
             if symbol != ".":       # a portal: cannot see the far side
                 out.append(d)
                 continue
-            target = None
-            for (x, y) in self.tiles:
-                if (x, y) in self.bodies:
-                    pass
             # neighbour by window offset, wrapping handled by the block itself
-            idx = (VISION + dy) * 7 + (VISION + dx)
-            keys = list(self.tiles.keys())
-            target = keys[idx]
+            target = list(self.tiles.keys())[(VISION + dy) * 7 + (VISION + dx)]
             if target in self.bodies:
                 continue
             out.append(d)

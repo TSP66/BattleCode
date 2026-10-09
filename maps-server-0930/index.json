@@ -1,0 +1,72 @@
+[
+ {
+  "id": 9,
+  "name": "Schooltime",
+  "sizeLabel": "60\u00d740",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 20,
+  "name": "Portals",
+  "sizeLabel": "32\u00d716",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 21,
+  "name": "Slithery Fight",
+  "sizeLabel": "63\u00d727",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 7,
+  "name": "Queen Of Spades",
+  "sizeLabel": "25\u00d735",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 4,
+  "name": "Default",
+  "sizeLabel": "32\u00d732",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 11,
+  "name": "Trophy",
+  "sizeLabel": "25\u00d725",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 17,
+  "name": "Prisoners Dilemma",
+  "sizeLabel": "32\u00d716",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 19,
+  "name": "Autarky",
+  "sizeLabel": "54\u00d718",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 13,
+  "name": "Devil",
+  "sizeLabel": "32\u00d716",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 15,
+  "name": "Trauma",
+  "sizeLabel": "48\u00d724",
+  "active": true,
+  "private": false
+ }
+]

@@ -21,6 +21,8 @@ Run it next to training; it waits for snapshots and evaluates each new one:
 from __future__ import annotations
 
 import argparse
+import ctypes
+import dataclasses
 import json
 import pathlib
 import re
@@ -30,10 +32,22 @@ import time
 import numpy as np
 import torch
 
+# tests only: BC_EVAL_FP32=1 plays every evaluation net in fp32 (TF32 off), which is
+# batch-size invariant, unlike bf16 autocast (small batches pick other kernels)
+EVAL_FP32 = __import__("os").environ.get("BC_EVAL_FP32") == "1"
+# BC_EVAL_QUEUE=0: the per-player path (one GPU wait per player), for comparisons
+EVAL_QUEUE = __import__("os").environ.get("BC_EVAL_QUEUE", "1") == "1"
+if EVAL_FP32:
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 import bcsim                                    # noqa: E402
 from train import memfeat                       # noqa: E402
+from train.sonar2 import intents_from_probs     # noqa: E402
 from train.net import ActorCritic, PyramidActorCritic, masked_logits   # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]  # repo root
@@ -60,14 +74,17 @@ def load_net(path: str | pathlib.Path, dev: torch.device) -> tuple[ActorCritic, 
     """
     ck = torch.load(path, map_location="cpu", weights_only=False)
     a = ck["args"]
-    if a.get("arch") == "lstm":
-        # train/lstm_net.py; plays through distill_lstm.LSTMGreedy, not greedy()
-        from train.lstm_net import LSTMPolicy
-        net = LSTMPolicy(**{k: a[k] for k in ("c1", "b1", "c2", "b2", "squeeze", "embed", "hidden", "layers")})
+    if a.get("arch") in ("lstm", "ff", "ffl"):
+        # train/lstm_net.py, train/ff_net.py; play through distill_lstm.LSTMGreedy, not greedy()
+        from train.ff_net import build
+        net = build(a)
         net.load_state_dict(ck["net"])
         net.to(dev).eval()
         return net, ck
     hidden = next(v for k, v in ck["net"].items() if k.endswith("fuse.0.weight")).shape[0]
+    # the checkpoint's own action count (48), not the simulator's (49 in a BC_SONAR2 build)
+    n_act = next((v.shape[0] for k, v in ck["net"].items() if k.replace("_orig_mod.", "") == "pi.bias"),
+                 bcsim.N_ACTIONS)
     # The scalar width comes from the checkpoint, never from the env. The env's
     # row grows as features are appended (708 -> 713 with the sonar echoes) and
     # every older net has to go on reading exactly the columns it was trained
@@ -81,13 +98,13 @@ def load_net(path: str | pathlib.Path, dev: torch.device) -> tuple[ActorCritic, 
                                    hid_ch=a["hid_ch"], side=a.get("side", bcsim.WIDE_SIDE),
                                    hidden=hidden, n_scalars=n_scalars)
     elif a.get("arch") == "pyramid":
-        net = PyramidActorCritic(bcsim.N_CHANNELS, bcsim.WIDE_CH, bcsim.N_ACTIONS,
+        net = PyramidActorCritic(bcsim.N_CHANNELS, bcsim.WIDE_CH, n_act,
                                  near_width=a["near_width"], near_blocks=a["near_blocks"],
                                  wide_width=a["wide_width"], wide_blocks=a["wide_blocks"],
                                  wide_side=bcsim.WIDE_SIDE, hidden=hidden,
                                  n_scalars=n_scalars)
     else:
-        net = ActorCritic(bcsim.N_CHANNELS, n_scalars, bcsim.N_ACTIONS,
+        net = ActorCritic(bcsim.N_CHANNELS, n_scalars, n_act,
                           width=a["width"], blocks=a["blocks"], hidden=hidden)
     net.load_state_dict({k.replace("_orig_mod.", ""): v for k, v in ck["net"].items()})
     net.to(dev).eval()
@@ -119,12 +136,15 @@ def greedy(net, dev, max_batch: int = 0):
     """
     wants = getattr(net, "wants_wide", False)
 
+    def forward(local_t, scalar_t, wide_t, mask_t):
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=not EVAL_FP32):
+            logits, _ = net(local_t, scalar_t, wide_t if wants else None)
+            return masked_logits(logits.float(), mask_t).argmax(dim=1)
+
     def act(local, scalar, mask, wide=None):
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-            logits, _ = net(torch.from_numpy(local).to(dev), torch.from_numpy(scalar).to(dev),
-                            torch.from_numpy(wide).to(dev) if wants else None)
-            m = torch.from_numpy(mask).to(dev).bool()
-            return masked_logits(logits.float(), m).argmax(dim=1).to(torch.int32).cpu().numpy()
+        return forward(torch.from_numpy(local).to(dev), torch.from_numpy(scalar).to(dev),
+                       torch.from_numpy(wide).to(dev) if wants else None,
+                       torch.from_numpy(mask).to(dev).bool()).to(torch.int32).cpu().numpy()
     act.wants_wide = wants
     return act
 
@@ -150,7 +170,9 @@ def _call(fn, obs, rows, wide=None, grid=None):
 def evaluate(learner, opponents: list[dict], maps: list[str], map_names: list[str],
              games: int = 16, threads: int = 8, seed: int = 12345,
              max_seconds: float = 900.0, progress: float = 0.0,
-             sonar: bool = False, memchan: bool = False) -> dict:
+             sonar: bool = False, memchan: bool = False, fast: bool = False,
+             skip_done: bool = False, privileged: bool = False, on_step=None,
+             return_games: bool = False) -> dict:
     """Plays `games` per (opponent, map) cell, half on each side.
 
     opponents: {"name", "bot": index} for a scripted bot, or {"name", "act":
@@ -180,9 +202,25 @@ def evaluate(learner, opponents: list[dict], maps: list[str], map_names: list[st
                          "ways; --sonar as well would only add a zero payload")
     env = bcsim.BattlecodeVecEnv(maps, num_envs=n, num_threads=threads, seed=seed,
                                  closure_capacity=max(8192, n * 160), wide=any_wide,
-                                 sonar=sonar, grid=any_grid)
+                                 sonar=sonar, grid=any_grid, privileged=privileged)
+    if privileged:
+        # the v8 Phi parts in the privileged row (wl_league logs them per round)
+        env.set_reward_v8(True, 1.0)
     learner_team = np.array([side for _, _, side in layout], np.int8)
     opp_of = np.array([o for o, _, _ in layout])
+    # sonar v2 (a BC_SONAR2 library): a player trained with it speaks the team packet with
+    # its own probabilities; one with fewer actions than the simulator plays its own
+    s2 = getattr(env, "sonar2", False)
+    speaks_l = s2 and getattr(learner, "speaks", False)
+    if s2:
+        for i, (o, _, side) in enumerate(layout):
+            f_ = opponents[o].get("act")
+            env.set_sonar2(i, ([side] if speaks_l else []) +
+                           ([1 - side] if getattr(f_, "speaks", False) else []))
+
+    def view(fn):
+        k = getattr(fn, "n_act", None)
+        return obs if k is None or k == obs.mask.shape[1] else dataclasses.replace(obs, mask=obs.mask[:, :k])
     for i, (o, mi, side) in enumerate(layout):
         bot = opponents[o].get("bot")
         env.set_opponent(i, team=(1 - side) if bot is not None else -1,
@@ -199,10 +237,41 @@ def evaluate(learner, opponents: list[dict], maps: list[str], map_names: list[st
     # the shared map has to be on in the gate if it was on in training: it moves
     # memfar, which every architecture here reads
     chan = memfeat.MemChannel(n) if memchan else None
+    # fast (2026-09-28): a game already counted is not computed any more (it only
+    # keeps stepping so the env stays in lockstep) -- a gate lasts as long as its
+    # longest game, and the old loop kept all ~1,560 games' nets running to the end --
+    # and opponents that share one player object (the gate's anchor repeats) are one
+    # call. Each player still gets exactly its own rows through the old data path:
+    # with the same batches the results were bit-identical to the old loop's
+    # (2026-09-28, 10 of 10 cells). In bf16 the batches differ (fewer rows), so games are not
+    # bit-identical; in fp32 they are (2026-10-01, every cell of a 9-cell gate). Uploading every array once per step was tried
+    # and was slower (75 MB a step against the rows each player needs).
+    skip_done = skip_done or fast
+    groups: dict = {}
+    for o in net_opps:
+        key = id(opponents[o]["act"]) if fast else o
+        groups.setdefault(key, (opponents[o]["act"], []))[1].append(o)
+    # Queued players (2026-10-01, user: faster checks): a grid policy (LSTMGreedy: the LSTM
+    # and feed-forward nets) is handed GPU tensors and its actions stay on the GPU, so every
+    # such player's work is queued before the step's one wait, instead of one wait per
+    # player. The grid is uploaded once a step from page-locked memory. Each player still
+    # gets exactly its own rows in the same order, so the games are the same.
+    def queued(fn) -> bool:
+        return EVAL_QUEUE and hasattr(fn, "_forward") and getattr(fn, "wants_grid", False)
+    q_dev = next((f.dev for f in [learner] + [o.get("act") for o in opponents]
+                  if f is not None and queued(f)), None)
+    if q_dev is not None:
+        g_pin = torch.zeros(env.grid.shape, dtype=torch.float32, pin_memory=True)
+        bcsim.env._lib.bcv_bind_grid(ctypes.c_void_p(env._h), ctypes.c_void_p(g_pin.data_ptr()))
+        env.grid = g_pin.numpy()
+        from train.sonar2 import intent_matrix
+        m_int = {w: torch.as_tensor(intent_matrix(w), device=q_dev) for w in (48, 49, 51, 75)}
     obs = env.reset()
     t0 = time.perf_counter()
     last_report = t0
+    steps = 0
     while (done < per_side).any():
+        steps += 1
         if progress and time.perf_counter() - last_report > progress:
             last_report = time.perf_counter()
             print(f"  {int((done >= per_side).sum())}/{n} games done, "
@@ -213,14 +282,50 @@ def evaluate(learner, opponents: list[dict], maps: list[str], map_names: list[st
             break
         if chan is not None:
             chan.receive(obs)
+        if on_step is not None:
+            on_step(obs, done < per_side)
         mine = obs.team == learner_team
         acts = np.zeros(n, np.int32)
-        if mine.any():
-            acts[mine] = _call(learner, obs, mine, env.wide, env.grid)
-        for o in net_opps:
-            rows = (~mine) & (opp_of == o)
+        live = done < per_side
+        me = mine & live if skip_done else mine
+        pend = []
+        if q_dev is not None:
+            g_dev = g_pin.to(q_dev, non_blocking=True)
+            m_dev = torch.from_numpy(obs.mask).to(q_dev, non_blocking=True).bool()
+
+        def play(fn, sel, speaks):
+            if queued(fn):
+                idx = np.flatnonzero(sel)
+                it = torch.as_tensor(idx, device=q_dev)
+                k = getattr(fn, "n_act", None) or m_dev.shape[1]
+                a_t = fn._forward(idx, obs.uid[idx], g_dev[it], m_dev[it][:, :k])
+                pend.append((sel, it, a_t, fn.last_probs if speaks else None))
+            else:
+                acts[sel] = _call(fn, view(fn), sel, env.wide, env.grid)
+                if speaks:
+                    env.intent[sel] = intents_from_probs(fn.last_probs)
+        if me.any():
+            play(learner, me, speaks_l)
+        for f, os_ in groups.values():
+            rows = ~mine & np.isin(opp_of, os_)
+            if skip_done:
+                rows &= live
             if rows.any():
-                acts[rows] = _call(opponents[o]["act"], obs, rows, env.wide, env.grid)
+                play(f, rows, s2 and getattr(f, "speaks", False))
+        if pend:
+            # the step's one wait: every queued player's actions (and packet intents) at once
+            a_all = torch.zeros(n, dtype=torch.int32, device=q_dev)
+            i_all = torch.zeros(n, 4, device=q_dev) if s2 else None
+            for _, it, a_t, pr in pend:
+                a_all[it] = a_t.to(torch.int32)
+                if pr is not None:
+                    i_all[it] = pr.float() @ m_int[pr.shape[1]]
+            a_np = a_all.cpu().numpy()
+            i_np = i_all.cpu().numpy() if s2 else None
+            for sel, _, _, pr in pend:
+                acts[sel] = a_np[sel]
+                if pr is not None:
+                    env.intent[sel] = i_np[sel]
         # portal usage is only counted against bots: there every closure is the
         # learner's, whereas against a network both sides' turns close
         turns += mine & (done < per_side) & is_bot
@@ -231,10 +336,12 @@ def evaluate(learner, opponents: list[dict], maps: list[str], map_names: list[st
             np.add.at(portal, closures.env[keep], closures.comps[keep, PORTAL])
         for row in eps.rows:
             e = int(row[0])
+            if skip_done and done[e] >= per_side:
+                # an uncounted game in a finished env: its dragons were never computed, so no
+                # player holds state for them (and these end every few steps)
+                continue
             for fn in stateful:
                 fn.forget(e)            # the env has already started its next game
-            if done[e] >= per_side:
-                continue
             done[e] += 1
             results[e].append(row.copy())
 
@@ -275,8 +382,11 @@ def evaluate(learner, opponents: list[dict], maps: list[str], map_names: list[st
                          "win": round(tot["win"] / g, 4), "draw": round(tot["draw"] / g, 4),
                          "kills": round(tot["kills"] / g, 3),
                          "portal": round(tot["portal_turns"] / max(tot["turns"], 1), 5)}
-    return {"cells": out, "summary": summary,
-            "seconds": round(time.perf_counter() - t0, 1)}
+    res = {"cells": out, "summary": summary,
+           "seconds": round(time.perf_counter() - t0, 1), "steps": steps}
+    if return_games:            # per-game episode rows (not JSON-serialisable)
+        res.update(layout=layout, games=results)
+    return res
 
 
 # ------------------------------------------------------------------ worker

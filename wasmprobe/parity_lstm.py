@@ -15,6 +15,14 @@ with -DBC_DUMP, which prints its grid, previous action, mask, logits and action.
 
     python parity_lstm.py bot_native ckpt.pt [maps_dir] [turns_per_map]
 
+Sonar v2 (a checkpoint with in_ch 43): the simulator is the BC_SONAR2 library in
+self-play, both teams speaking the packet with random probabilities, so the blocks
+carry real packets; the report planes are checked like every other channel, and
+each packet the bot sends is checked against the one the simulator would send for
+that dragon on that turn (every field but the probabilities, which come from the
+bot's own int16 net, and the tag that covers them) and against the checkpoint's
+probabilities (within one quantisation step).
+
 Exits 1 (check_lstm.sh treats it as a failure) unless: the bot's legal-move
 mask equals the simulator's on every turn; no grid channel but the
 self ones ever differs; the self channels differ on under 2% of turns; the bot
@@ -25,6 +33,7 @@ under 1% of turns.
 """
 
 import ctypes
+import os
 import pathlib
 import subprocess
 import sys
@@ -34,15 +43,28 @@ import torch
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bcsim"))
+# the library has to be chosen before bcsim loads it: 43 input channels = sonar v2
+_ck_in = torch.load(sys.argv[2], map_location="cpu", weights_only=False)["args"].get("in_ch", 38) \
+    if len(sys.argv) > 2 else 38
+if _ck_in >= 43:
+    os.environ["BCSIM_LIB"] = str(ROOT / "bcsim/bcsim/libbcvec_s2.so")
 
 import bcsim                              # noqa: E402
 from bcsim.env import _lib as VLIB        # noqa: E402
 from train import augment                 # noqa: E402
-from train.lstm_net import CHANNELS, LSTMPolicy, NO_ACTION  # noqa: E402
+from train.lstm_net import CHANNELS, SONAR2_CHANNELS, LSTMPolicy, NO_ACTION  # noqa: E402
 from train.net import masked_logits       # noqa: E402
+from train import sonar2 as S2            # noqa: E402
 
 VLIB.bcv_round_block.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
-NCH, GC, A = 38, 196, bcsim.N_ACTIONS
+NCH, GC, A = _ck_in, 196, bcsim.N_ACTIONS
+SONAR2 = NCH >= 43
+if SONAR2:
+    CHANNELS = CHANNELS + SONAR2_CHANNELS
+    VLIB.bcv_s2_preview.restype = ctypes.c_ulonglong
+    VLIB.bcv_s2_preview.argtypes = [ctypes.c_void_p, ctypes.c_int]
+# the packet bits the bot fills from its own state (not its net's probabilities or the tag)
+STATE_BITS = ((1 << 56) - 1) & ~(((1 << 12) - 1) << 14) & ~(((1 << 10) - 1) << 2)
 SELF = [CHANNELS.index(c) for c in ("self_body", "self_index", "self_tail")]
 TOL = 1.5 / 4096                          # Q12 rounding of values the simulator keeps in float
 LOGIT_P99 = 0.25                          # bf16 inference, what the evaluations ran, is ~0.08
@@ -58,19 +80,26 @@ def block(env) -> str:
 def follow(text: str, seed: int, turns: int):
     m = augment.parse(text)
     env = bcsim.BattlecodeVecEnv([text], num_envs=1, num_threads=1, seed=seed, sonar=True, grid=True)
+    if SONAR2:
+        env.set_sonar2(0, (0, 1))
     obs = env.reset()
     me = int(obs.dragon_id[0])
     team = "AB"[int(obs.team[0])]
     rng = np.random.default_rng(seed)
-    blocks, grids, masks = [], [], []
+    blocks, grids, masks, pkts = [], [], [], []
     for _ in range(20000):
+        if SONAR2:
+            env.intent[0] = S2.intents_from_probs(rng.dirichlet(np.ones(A))[None])[0]
         if int(obs.dragon_id[0]) == me:
             blocks.append(block(env))
             grids.append(env.grid[0].copy())
             masks.append(obs.mask[0].astype(bool).copy())
+            if SONAR2:
+                pkts.append(int(VLIB.bcv_s2_preview(ctypes.c_void_p(env._h), 0)))
             if len(blocks) >= turns:
                 break
         legal = np.nonzero(obs.mask[0])[0]
+        legal = legal[legal < 48]                 # never the self-kill: keep the dragon alive
         steps = legal[legal < 3]
         pick = steps if len(steps) and rng.random() < 0.85 else legal
         a = int(rng.choice(pick)) if len(pick) else 0
@@ -81,7 +110,7 @@ def follow(text: str, seed: int, turns: int):
     env.close()
     header = f"ID {me}\nTEAM {team}\nMAP {m.w} {m.h}\nUNIT_LIMIT {m.unit_limit or 64}\n"
     # the engine ends every game with ENDGAME; without it the helper throws at EOF
-    return header + "".join(blocks) + "ENDGAME\n", grids, masks
+    return header + "".join(blocks) + "ENDGAME\n", grids, masks, pkts, team
 
 
 def main() -> None:
@@ -90,7 +119,7 @@ def main() -> None:
     turns = int(sys.argv[4]) if len(sys.argv) > 4 else 120
     ck = torch.load(ckpt, map_location="cpu", weights_only=False)
     arch = {k: ck["args"][k] for k in ("c1", "b1", "c2", "b2", "squeeze", "embed", "hidden", "layers")}
-    net = LSTMPolicy(**arch)
+    net = LSTMPolicy(**arch, in_ch=NCH, n_actions=ck["args"].get("n_actions", 48))
     net.load_state_dict(ck["net"])
     net.eval()
 
@@ -98,10 +127,14 @@ def main() -> None:
     acc_peak = 0
     ch_bad = np.zeros(NCH, np.int64)
     max_dl, dl_all = 0.0, []
+    pk_n = pk_state_bad = pk_tag_bad = pk_prob_bad = 0
     for f in sorted(pathlib.Path(maps_dir).glob("*.map")):
         for seed in (1, 2):
-            transcript, want, want_mask = follow(f.read_text(), seed, turns)
+            transcript, want, want_mask, want_pkt, team = follow(f.read_text(), seed, turns)
             res = subprocess.run([bot], input=transcript.encode(), capture_output=True, timeout=600)
+            # the payload of each turn's four sonars (all four carry the same one)
+            sent = [int(l.split()[2]) for l in res.stdout.decode().splitlines() if l.startswith("SONAR N ")]
+            rounds = [int(l.split()[1]) for l in transcript.splitlines() if l.startswith("ROUND ")]
             lines = res.stderr.decode().splitlines()
             rows = [np.array(l.split()[1:], np.float64) for l in lines if l.startswith("DUMP")]
             peaks = [int(l.split()[1]) for l in lines if l.startswith("ACCPEAK")]
@@ -129,10 +162,21 @@ def main() -> None:
                     s_bad += 1
                 with torch.no_grad():
                     lg, _, state = net(torch.from_numpy(g).float()[None],
-                                       torch.tensor([prev if prev >= 0 else NO_ACTION]), state)
+                                       torch.tensor([prev if prev >= 0 else net.no_action]), state)
                 m_t = torch.from_numpy(mask > 0)[None]
                 lt = masked_logits(lg.float(), m_t)[0].numpy()
                 legal = mask > 0
+                if SONAR2 and t < len(sent) and t < len(want_pkt):
+                    pk_n += 1
+                    v = sent[t]
+                    pk_state_bad += (v & STATE_BITS) != (want_pkt[t] & STATE_BITS)
+                    d = S2.decode(v, "AB".index(team), rounds[t]) if t < len(rounds) else None
+                    pk_tag_bad += d is None or d["round"] != rounds[t]
+                    if d is not None and legal.any():
+                        pr = torch.softmax(torch.from_numpy(np.where(legal, lt, -1e30)), 0).numpy()
+                        want_i = S2.intents_from_probs(pr[None])[0]
+                        got_i = np.array([d["p_split"], d["p_sprint"], d["p_left"], d["p_right"]])
+                        pk_prob_bad += np.abs(want_i - got_i).max() > 1.5 / 31
                 if legal.any():
                     dl = np.abs(lt[legal] - logits_bot[legal]).max()
                     dl_all.append(dl)
@@ -157,6 +201,13 @@ def main() -> None:
     print(f"int32 accumulator peak {acc_peak:,} ({acc_peak / 2**31:.2%} of overflow)")
     fails = []
     print(f"legal-move mask vs simulator: {mask_bad} of {n_turns} turns differ")
+    if SONAR2:
+        print(f"sonar v2 packets: {pk_n} checked; state fields differ from the simulator's on {pk_state_bad}; "
+              f"tag fails on {pk_tag_bad}; probabilities off the checkpoint's by > 1 step on {pk_prob_bad}")
+        if pk_n == 0 or pk_state_bad or pk_tag_bad:
+            fails.append("sonar v2 packet differs from the simulator's")
+        if pk_prob_bad > 0.01 * max(pk_n, 1):
+            fails.append("sonar v2 probabilities off the checkpoint's on over 1% of turns")
     if mask_bad:
         fails.append(f"mask differs on {mask_bad} turns")
     if grid_bad:

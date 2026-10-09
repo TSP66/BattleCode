@@ -21,6 +21,9 @@ import torch.nn.functional as F
 GRID = 14            # head at row 7, col 7: 7 cells ahead/left, 6 behind/right
 N_ACTIONS = 48       # 39 relative paths (1-3 steps of straight/left/right) + 9 splits
 NO_ACTION = N_ACTIONS  # the "previous action" of a dragon on its first turn
+# The next-generation sim (BC_SONAR2 library) adds the self-kill as id 48: a net built
+# with n_actions=49 has 49 logits and its "no previous action" is 49 (net.no_action).
+SUICIDE = 48
 
 # ---------------------------------------------------------------- input channels
 # Every channel in [0, 1]. Outside the 7x7 live window, "live" channels are 0.
@@ -51,6 +54,30 @@ CHANNELS = [
 ]
 N_CH = len(CHANNELS)
 assert N_CH == 38
+# Sonar v2 (cpp/bc_sonar2.hpp, a BC_SONAR2 library): five more, at each teammate's
+# reported head this turn. A net built with in_ch=43 reads them; a 38-channel net
+# reads grid[:, :38] of the same env (in_ch_of / fit_grid below).
+SONAR2_CHANNELS = ["rep_len", "rep_split", "rep_sprint", "rep_dx", "rep_dy"]
+N_CH_S2 = N_CH + len(SONAR2_CHANNELS)
+# BC_PORTALREP (2026-10-02, make -C bcsim s2g15p): the same five slots, the last four holding what
+# lies through each known portal, painted on the tile across its edge (PORTAL_PLANES below)
+PORTAL_SONAR2_CHANNELS = ["rep_len", "portal_known", "portal_closed", "portal_room", "portal_pearls"]
+# The queens (2026-10-01, cpp/bc_memory.hpp grid_cfg IS_QUEEN..EQ_FRESH; tests/test_queens.py):
+# eleven more after the reports, so a 43-channel net reads grid[:, :43] (fit_grid).
+QUEEN_CHANNELS = ["is_queen",                              # constant: this dragon is our queen
+                  "ally_queen", "enemy_queen",             # their segments in the live 7x7
+                  "ally_queen_mem", "enemy_queen_mem",     # exp(-age/32) at the last known place
+                  "aq_dx", "aq_dy", "aq_fresh",            # constant: our queen's ego offset / 32, exp(-age/32)
+                  "eq_dx", "eq_dy", "eq_fresh"]            # theirs
+N_CH_Q = N_CH_S2 + len(QUEEN_CHANNELS)
+assert N_CH_Q == 54
+# The dragon's identity (2026-10-03, cpp/bc_memory.hpp grid_cfg BIRTH..ID43): three constant planes
+# after the queens. No CNN reads them (a net's in_ch stays <= N_CH_Q, so fit_grid drops them);
+# only ff_net FFLPolicy ident_in feeds them to the first dense layer.
+IDENT_CHANNELS = ["birth",                                 # birth round / 500 (0 = spawned with the map)
+                  "id7", "id43"]                           # sin(id / 7), sin(id / 43)
+N_CH_ID = N_CH_Q + len(IDENT_CHANNELS)
+assert N_CH_ID == 57
 
 
 class ResBlock(nn.Module):
@@ -83,12 +110,16 @@ class LSTMPolicy(nn.Module):
     # norm-free version metered 79.4M but did not learn (see ResBlock). 48/128
     # metered 92.6M and 64/128 108.6M without norms, so the CNN is at its ceiling.
     def __init__(self, c1: int = 48, b1: int = 1, c2: int = 112, b2: int = 2,
-                 squeeze: int = 16, embed: int = 256, hidden: int = 128, layers: int = 2):
+                 squeeze: int = 16, embed: int = 256, hidden: int = 128, layers: int = 2,
+                 in_ch: int = N_CH, n_actions: int = N_ACTIONS, grid: int = GRID):
         super().__init__()
-        self.hidden, self.layers = hidden, layers
+        self.hidden, self.layers, self.in_ch = hidden, layers, in_ch
+        self.grid = grid
+        g2 = (grid + 1) // 2                     # after the stride-2 conv: 14 -> 7, 17 -> 9
+        self.n_actions, self.no_action = n_actions, n_actions
 
         # --- spatial: 14x14 at full resolution, then 7x7
-        self.stem = nn.Conv2d(N_CH, c1, 3, padding=1)                  # 38x14x14 -> 48x14x14
+        self.stem = nn.Conv2d(in_ch, c1, 3, padding=1)                 # 38 (43) x14x14 -> 48x14x14
         self.stem_n = nn.GroupNorm(8, c1)
         self.res15 = nn.Sequential(*[ResBlock(c1) for _ in range(b1)])  # 48x14x14
         self.down = nn.Conv2d(c1, c2, 3, stride=2, padding=1)          # -> 112x7x7
@@ -97,12 +128,12 @@ class LSTMPolicy(nn.Module):
         self.squeeze = nn.Conv2d(c2, squeeze, 1)                       # -> 16x7x7 = 784
 
         # --- flat
-        self.embed = nn.Linear(squeeze * 7 * 7, embed)                 # 784 -> 256
-        self.prev_action = nn.Embedding(N_ACTIONS + 1, 48)             # one-hot 49 -> 48, as a lookup
+        self.embed = nn.Linear(squeeze * g2 * g2, embed)               # 784 (14x14) / 1296 (17x17) -> 256
+        self.prev_action = nn.Embedding(n_actions + 1, 48)             # one-hot 49 (50) -> 48, as a lookup
         self.in_norm = nn.LayerNorm(embed + 48)                        # what the LSTM reads
         self.lstm = nn.ModuleList(
             nn.LSTMCell(embed + 48 if i == 0 else hidden, hidden) for i in range(layers))
-        self.pi = nn.Linear(hidden, N_ACTIONS)
+        self.pi = nn.Linear(hidden, n_actions)
         self.v = nn.Linear(hidden, 1)       # training only; never exported
 
         for cell in self.lstm:              # forget gate open, so state persists early on
@@ -121,7 +152,10 @@ class LSTMPolicy(nn.Module):
     def encode(self, grid, prev_a):
         """Everything before the recurrence: no state, so a whole batch of
         turns from many dragons and times can go through at once."""
-        x = F.silu(self.stem_n(self.stem(grid)))
+        g = fit_grid(grid, self.in_ch)
+        if getattr(self, "blind_portal", False):
+            g = blind_portal_planes(g)
+        x = F.silu(self.stem_n(self.stem(g)))
         x = self.res15(x)
         x = F.silu(self.down_n(self.down(x)))
         x = self.res8(x)
@@ -140,6 +174,59 @@ class LSTMPolicy(nn.Module):
 
     def forward(self, grid, prev_a, state):
         return self.step(self.encode(grid, prev_a), state)
+
+
+PORTAL_PLANES = (39, 43)    # BC_PORTALREP (cpp/bc_memory.hpp PT_*): the intent planes' channels
+
+
+def blind_portal_planes(grid):
+    """The grid with the portal planes zeroed: what a net trained before BC_PORTALREP reads in a
+    portal simulator (ff_net.build sets net.blind_portal), since its channels 39-42 meant the
+    teammates' move intents, which no longer exist -- zero is what it saw with nobody reporting."""
+    a, b = PORTAL_PLANES
+    if grid.shape[1] <= a:
+        return grid
+    return torch.cat([grid[:, :a], grid.new_zeros(grid.shape[0], min(b, grid.shape[1]) - a, *grid.shape[2:]),
+                      grid[:, b:]], 1)
+
+
+def fit_grid(grid, in_ch: int):
+    """A grid from any library for a net of any width: a narrower net takes the grid's first
+    in_ch channels (38 or 43 of a 54-channel grid); a wider one gets zeros for the channels
+    the library does not have (a team that hears no packets, sees no queen)."""
+    c = grid.shape[1]
+    if c == in_ch:
+        return grid
+    if c > in_ch:
+        return grid[:, :in_ch]
+    pad = grid.new_zeros(grid.shape[0], in_ch - c, *grid.shape[2:])
+    return torch.cat([grid, pad], 1)
+
+
+def widen_actions(state: dict, n_actions: int = 49, new_bias: float = -8.0) -> dict:
+    """A 48-action checkpoint for a 49-action net: the self-kill gets a zero weight row
+    and a strongly negative bias (so the widened net plays as before), and the old
+    "no previous action" row moves from 48 to 49 behind a fresh self-kill row."""
+    w, b = state["pi.weight"], state["pi.bias"]
+    if w.shape[0] >= n_actions:
+        return state
+    k = n_actions - w.shape[0]
+    emb = state["prev_action.weight"]                  # (old + 1, 48): last row = no action
+    state = {**state,
+             "pi.weight": torch.cat([w, w.new_zeros(k, w.shape[1])]),
+             "pi.bias": torch.cat([b, b.new_full((k,), new_bias)]),
+             "prev_action.weight": torch.cat([emb[:-1], emb.new_zeros(k, emb.shape[1]), emb[-1:]])}
+    return state
+
+
+def widen_stem(state: dict, in_ch: int) -> dict:
+    """A narrower checkpoint's weights for an in_ch-channel net: the new input channels
+    start at zero, so the widened net plays exactly as the old one."""
+    w = state["stem.weight"]
+    if w.shape[1] < in_ch:
+        z = w.new_zeros(w.shape[0], in_ch - w.shape[1], *w.shape[2:])
+        state = {**state, "stem.weight": torch.cat([w, z], 1)}
+    return state
 
 
 if __name__ == "__main__":

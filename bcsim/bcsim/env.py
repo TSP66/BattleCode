@@ -18,6 +18,7 @@ hand back a neat (reward, done) row per env. Instead it returns:
 from __future__ import annotations
 
 import ctypes
+import os
 import pathlib
 from dataclasses import dataclass, field
 
@@ -42,6 +43,7 @@ _lib.bcv_closures.argtypes = [ctypes.c_void_p] + [ctypes.c_void_p] * 4 + [ctypes
 _lib.bcv_episodes.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
 _lib.bcv_layout.argtypes = [ctypes.c_void_p]
 _lib.bcv_set_map_weights.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+_lib.bcv_set_pearl_seed64.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ulonglong]
 _lib.bcv_set_env_opponent.argtypes = [ctypes.c_void_p] + [ctypes.c_int] * 4
 _lib.bcv_set_potential_gamma.argtypes = [ctypes.c_void_p, ctypes.c_float]
 _lib.bcv_set_reward_v8.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_float,
@@ -59,16 +61,16 @@ if SONAR_DIRS <= 0:
     raise RuntimeError(f"{_LIB_PATH.name} predates the 64-bit sonar payload; "
                        "rebuild with `make -C bcsim`")
 
-# Privileged critic features. PRIV_BASE is the original global summary, and the
-# rest are reward v8's potential components for the acting dragon's team, emitted
-# by the engine so the critic's anchor V = -Phi + f_theta is exact rather than a
-# reimplementation that can drift. A net built before these existed declares
-# n_priv = PRIV_BASE and slices, exactly as a flat policy slices the scalar row.
+# Privileged critic features. PRIV_BASE is the global summary (both teams' size,
+# longest, units, round, and since 2026-10-01 both queens' lengths), and the rest
+# are reward v8's potential components for the acting dragon's team, emitted by
+# the engine so nothing reimplements Phi.
 _lib.bcv_priv_count.restype = ctypes.c_int
+_lib.bcv_priv_base.restype = ctypes.c_int
 PRIV_COUNT = int(_lib.bcv_priv_count())
-PRIV_BASE = 8
+PRIV_BASE = int(_lib.bcv_priv_base())
 N_PHI_TERMS = PRIV_COUNT - PRIV_BASE
-PHI_COMPS = ["v8_win", "v8_len", "v8_top3", "v8_kill", "v8_exp"]
+PHI_COMPS = ["v8_win", "v8_len", "v8_queen", "v8_kill", "v8_exp"]
 assert N_PHI_TERMS == len(PHI_COMPS), "PRIV_COUNT is out of step with bc8::N_TERMS"
 EP_COLS = _lib.bcv_ep_cols()
 # the remembered map as planes: 2 * 6 channels of WIDE_SIDE x WIDE_SIDE, the
@@ -79,6 +81,17 @@ if hasattr(_lib, "bcv_wide_shape"):
     WIDE_CH, WIDE_SIDE = _wide[0], _wide[1]
 else:
     WIDE_CH, WIDE_SIDE = 0, 0
+# BC_PORTALREP build (cpp/bc_sonar2.hpp): grid channels 39-42 are the portal planes, not the intents
+PORTAL_BUILD = bool(getattr(_lib, "bcv_portal_build", None) and _lib.bcv_portal_build())
+
+# the policy's grid (cpp/bc_memory.hpp grid_cfg): GRID_CH channels of GRID_SIDE x GRID_SIDE.
+# 38 (old), 43 (sonar v2), 54 (sonar v2 + the queens, 2026-10-01); train/lstm_net.py names them.
+if hasattr(_lib, "bcv_grid_shape"):
+    _gs = (ctypes.c_int * 2)()
+    _lib.bcv_grid_shape(_gs)
+    GRID_CH, GRID_SIDE = int(_gs[0]), int(_gs[1])
+else:
+    GRID_CH, GRID_SIDE = 0, 0
 # the whole board for the privileged critic: BOARD_CH planes of
 # BOARD_MAX x BOARD_MAX (cpp/bc_obs.hpp). Only libbcvec_priv.so exports it.
 if hasattr(_lib, "bcv_board_shape"):
@@ -111,7 +124,7 @@ REWARD_COMPS = ["length_delta", "pearls", "sprint_cost", "split_cost", "died",
                 # zero-sum team potential, already scaled by
                 # kappa * lambda_i(t) / sum(lambda(t)), so their weights are 1.0
                 # and not knobs. Only the terminal result is weighted.
-                "v8_win", "v8_len", "v8_top3", "v8_kill", "v8_exp", "outcome"]
+                "v8_win", "v8_len", "v8_queen", "v8_kill", "v8_exp", "outcome"]
 assert len(REWARD_COMPS) == N_REWARD_COMPS, "REWARD_COMPS is out of step with RW_COUNT"
 
 # A sensible starting point: grow, stay alive, win. Override per experiment.
@@ -124,6 +137,24 @@ DEFAULT_REWARD_WEIGHTS = {
     "lose": -5.0,
     "final_length": 0.05,
 }
+
+
+def cview_layout(w: int) -> dict:
+    """Byte layout of a critic-view row with a w x w crop (bc_vec.hpp, cview_stride): the
+    bit-packed view planes 0..nbits-1 at [0, bits), the byte planes nbits..ch-1 at [bytes,
+    coarse), the pooled board at [coarse, coarse + ch * side * side), rows `stride` bytes
+    apart; `src` is the board plane each view plane comes from."""
+    if not hasattr(_lib, "bcv_cview_layout"):
+        raise RuntimeError(f"{_LIB_PATH.name} has no critic view: rebuild it (make -C bcsim)")
+    if w < 1 or w > 63 or w % 2 == 0:
+        raise ValueError(f"critic-view crop must be odd, 1..63 (got {w})")
+    out = (ctypes.c_int * 7)()
+    _lib.bcv_cview_layout(int(w), out)
+    lay = dict(zip(("bits", "bytes", "coarse", "stride", "ch", "nbits", "side"), list(out)))
+    src = (ctypes.c_int * lay["ch"])()
+    _lib.bcv_cview_src(src)
+    lay["src"] = list(src)
+    return lay
 
 
 def reward_vector(weights: dict[str, float] | None = None) -> np.ndarray:
@@ -187,7 +218,7 @@ class BattlecodeVecEnv:
                  seed: int = 0, egocentric: bool = True, random_pearl_seed: bool = True,
                  max_rounds: int = 500, closure_capacity: int | None = None,
                  privileged: bool = False, board: bool = False, wide: bool = False,
-                 sonar: bool = False, grid: bool = False):
+                 sonar: bool = False, grid: bool = False, cview: int = 0):
         if not maps:
             raise ValueError("need at least one map")
         blob = b"".join(m.encode() for m in maps)
@@ -249,16 +280,19 @@ class BattlecodeVecEnv:
             _lib.bcv_bind_board.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
             self.board = np.zeros((num_envs, shape[0], shape[1], shape[1]), np.uint8)
             _lib.bcv_bind_board(ctypes.c_void_p(self._h), self.board.ctypes.data)
+        # the critic view (bc_vec.hpp cview_stride; train/cview.py decodes it): (num_envs, stride)
+        # uint8, a W x W crop about the acting head plus the pooled board. cview = W (odd), 0 = off
+        self.cview, self.cview_w = None, 0
+        if cview:
+            self.bind_cview(np.zeros((num_envs, cview_layout(cview)["stride"]), np.uint8), cview)
         self.grid = None
         if grid:
-            # (num_envs, 38, 14, 14): the LSTM policy's input, in the dragon's
+            # (num_envs, GRID_CH, GRID_SIDE, GRID_SIDE): the policy's input, in the dragon's
             # frame (cpp/bc_memory.hpp grid_cfg, train/lstm_net.py CHANNELS)
             if not hasattr(_lib, "bcv_bind_grid"):
                 raise RuntimeError(f"{_LIB_PATH.name} has no grid export; rebuild with `make -C bcsim`")
-            shape = (ctypes.c_int * 2)()
-            _lib.bcv_grid_shape(shape)
             _lib.bcv_bind_grid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-            self.grid = np.zeros((num_envs, shape[0], shape[1], shape[1]), np.float32)
+            self.grid = np.zeros((num_envs, GRID_CH, GRID_SIDE, GRID_SIDE), np.float32)
             _lib.bcv_bind_grid(ctypes.c_void_p(self._h), self.grid.ctypes.data)
         self.wide = None
         if wide:
@@ -274,6 +308,31 @@ class BattlecodeVecEnv:
             _lib.bcv_bind_wide.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
             self.wide = np.zeros((num_envs, shape[0], shape[1], shape[1]), np.float32)
             _lib.bcv_bind_wide(ctypes.c_void_p(self._h), self.wide.ctypes.data)
+
+        # Sonar v2 (cpp/bc_sonar2.hpp): a library built with BC_SONAR2 (make -C bcsim s2)
+        # draws 43 grid channels and lets a team speak the v2 packet (set_sonar2).
+        # `intent` is the caller's per-env P(split), P(sprint), P(left), P(right) for
+        # the action it is about to send; the acting dragon of a v2 team casts it.
+        # A BC_PORTALREP library (make -C bcsim s2g15p, 2026-10-02) sends the portal report in
+        # place of the intents: `portal` is True and `intent` is an unbound array, so callers
+        # that still write intents may, and nothing reads them.
+        self.sonar2 = bool(getattr(_lib, "bcv_sonar2_build", None) and _lib.bcv_sonar2_build())
+        self.portal = PORTAL_BUILD
+        self.intent = None
+        if self.sonar2:
+            _lib.bcv_set_sonar2.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+            _lib.bcv_restart_env.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            self.intent = np.zeros((num_envs, 4), np.float32)
+            if not self.portal:
+                _lib.bcv_bind_intent.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+                _lib.bcv_bind_intent(ctypes.c_void_p(self._h), self.intent.ctypes.data)
+
+        self.queen_guard = False
+        if os.environ.get("BC_QUEEN_GUARD", "0") == "1":
+            self.set_queen_guard(True)
+        self.queen_deadend = 0
+        if os.environ.get("BC_QUEEN_DEADEND", "0") in ("1", "2"):
+            self.set_queen_deadend(int(os.environ["BC_QUEEN_DEADEND"]))
 
         cap = closure_capacity or max(1024, num_envs * 140)
         self._cl_env = np.zeros(cap, np.int32)
@@ -313,6 +372,27 @@ class BattlecodeVecEnv:
                            self._round, self._priv)
 
     # -------------------------------------------------- configuration
+    def set_sonar2(self, env_index: int, teams) -> None:
+        """Which teams of an env speak the v2 team packet: an iterable of team ids
+        (0, 1), e.g. (0, 1) for self-play or () for none. Needs a BC_SONAR2 library."""
+        if not self.sonar2:
+            raise RuntimeError(f"{_LIB_PATH.name} was not built with BC_SONAR2 (make -C bcsim s2)")
+        mask = 0
+        for t in teams:
+            mask |= 1 << int(t)
+        _lib.bcv_set_sonar2(ctypes.c_void_p(self._h), int(env_index), mask)
+
+    def restart_env(self, env_index: int) -> None:
+        """Starts env i's next game now (pinned map, pending pearl seed), abandoning
+        the current one; its row of the observation buffers is rewritten."""
+        _lib.bcv_restart_env(ctypes.c_void_p(self._h), int(env_index))
+
+    def set_pearl_seed64(self, env_index: int, seed: int) -> None:
+        """Env `env_index`'s next episode draws pearls as a server game with this
+        match seed does (unswbc 1.1+: std::mt19937_64; the "seed" of /battles/:id,
+        hex). One episode only; call before reset()."""
+        _lib.bcv_set_pearl_seed64(ctypes.c_void_p(self._h), env_index, seed & (2**64 - 1))
+
     def set_map_weights(self, weights) -> None:
         """Relative sampling weight per map, used from each env's next episode."""
         w = np.ascontiguousarray(weights, dtype=np.float64)
@@ -333,6 +413,61 @@ class BattlecodeVecEnv:
         out = np.zeros(3 + N_MOVES * f, np.int32)
         _lib.bcv_probe(ctypes.c_void_p(self._h), env_index, out.ctypes.data)
         return out[:3], out[3:].reshape(N_MOVES, f)
+
+    PERFECT_KINDS = ["none", "blank", "queen_kill", "late_suicide", "trapped_queen", "pearl", "keep_wall",
+                     "queen_deadend"]
+
+    def set_scenario(self, env_index: int, round_: int, dragons, pearls=(), acting: int = 0) -> bool:
+        """A synthetic position (VecEnv::set_scenario): env_index starts a new game on its map
+        (pin it with set_opponent(..., map_index=)), then holds exactly `dragons` -- a list of
+        (team, [(x, y), ... head first]); an empty body is a dragon already dead; ids 0 and 1 are
+        the queens -- with pearls on `pearls` [(x, y)], at round `round_`, dragon `acting` to move
+        with a fresh memory. False if rejected (a body not a chain of steps, overlaps, off the
+        map). Read the new observation with observation() / grid."""
+        if not hasattr(_lib, "bcv_set_scenario"):
+            raise RuntimeError(f"{_LIB_PATH.name} has no scenarios: rebuild it (make -C bcsim)")
+        _lib.bcv_set_scenario.argtypes = [ctypes.c_void_p] + [ctypes.c_int] * 3 + [ctypes.c_void_p] * 3 + \
+            [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+        _lib.bcv_set_scenario.restype = ctypes.c_int
+        w = self._map_w[env_index] if hasattr(self, "_map_w") else None
+        team = np.array([t for t, _ in dragons], np.int32)
+        lens = np.array([len(b) for _, b in dragons], np.int32)
+        if w is None:
+            raise RuntimeError("set_scenario needs set_scenario_maps() first")
+        cells = np.array([y * w + x for _, b in dragons for x, y in b] or [0], np.int32)
+        pc = np.array([y * w + x for x, y in pearls] or [0], np.int32)
+        ok = _lib.bcv_set_scenario(ctypes.c_void_p(self._h), env_index, int(round_), len(dragons),
+                                   team.ctypes.data, lens.ctypes.data, cells.ctypes.data,
+                                   len(pearls), pc.ctypes.data, int(acting))
+        return bool(ok)
+
+    def set_scenario_maps(self, widths) -> None:
+        """Each env's map width (the scenario cells are y * w + x on that env's pinned map)."""
+        self._map_w = list(widths)
+
+    @staticmethod
+    def far_targets() -> tuple[int, list]:
+        """BC_FARSPRINT: (first id, [(ox, oy)] ego offsets, ox right, oy back), or (-1, [])."""
+        if not hasattr(_lib, "bcv_far_targets"):
+            return -1, []
+        out = (ctypes.c_int * 48)()
+        first = ctypes.c_int()
+        _lib.bcv_far_targets.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        n = _lib.bcv_far_targets(out, ctypes.byref(first))
+        return (first.value if n else -1), [(out[2 * k], out[2 * k + 1]) for k in range(n)]
+
+    def perfect(self) -> tuple[np.ndarray, np.ndarray]:
+        """Perfect-play labels for every env's acting dragon, from the true game
+        (VecEnv::perfect in cpp/bc_obs.hpp; supervised_learning.md): (kind (N,) int32,
+        index into PERFECT_KINDS; acts (N, N_ACTIONS) uint8, 1 on every correct action)."""
+        if not hasattr(_lib, "bcv_perfect"):
+            raise RuntimeError(f"{_LIB_PATH.name} has no perfect-play labels: rebuild it (make -C bcsim)")
+        _lib.bcv_perfect.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+        _lib.bcv_perfect.restype = ctypes.c_int
+        kind = np.zeros(self.num_envs, np.int32)
+        acts = np.zeros((self.num_envs, N_ACTIONS), np.uint8)
+        _lib.bcv_perfect(ctypes.c_void_p(self._h), kind.ctypes.data, acts.ctypes.data)
+        return kind, acts
 
     def last_deaths(self, env_index: int) -> np.ndarray:
         """(n, 4) rows (dragon id, reason, killer id or -1, team) of the
@@ -361,6 +496,43 @@ class BattlecodeVecEnv:
         per-agent invariance. See REWARDS.md."""
         _lib.bcv_set_reward_v8(ctypes.c_void_p(self._h), int(bool(on)), float(kappa),
                                int(credit))
+
+    def set_queen_guard(self, on: bool = True) -> None:
+        """The queen guard (cpp/bc_vec.hpp VecConfig::queen_guard, user 2026-10-03): a queen's mask
+        drops the self-kill and every move onto another dragon's head, unless that leaves her no
+        legal action. Every env made in a process with BC_QUEEN_GUARD=1 starts with it on."""
+        if not hasattr(_lib, "bcv_set_queen_guard"):
+            raise RuntimeError(f"{_LIB_PATH.name} has no queen guard; rebuild with `make -C bcsim`")
+        _lib.bcv_set_queen_guard.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        _lib.bcv_set_queen_guard(ctypes.c_void_p(self._h), int(bool(on)))
+        self.queen_guard = bool(on)
+
+    def set_queen_deadend(self, on: bool | int = True) -> None:
+        """The queen dead-end mask (cpp/bc_vec.hpp VecConfig::queen_deadend, user 2026-10-09): a queen's
+        moves that leave her dead or in a dead end she can see are masked while another move is not.
+        Level 2 (True means 1): her own body walls the dead end, and when every move is fatal only the
+        splits that leave her a way out stay. Every env made in a process with BC_QUEEN_DEADEND=1 or 2
+        starts at that level."""
+        if not hasattr(_lib, "bcv_set_queen_deadend"):
+            raise RuntimeError(f"{_LIB_PATH.name} has no queen dead-end mask; rebuild it")
+        _lib.bcv_set_queen_deadend.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        level = int(on)
+        _lib.bcv_set_queen_deadend(ctypes.c_void_p(self._h), level)
+        self.queen_deadend = level
+
+    def bind_cview(self, buf: np.ndarray, w: int) -> None:
+        """Write the critic view into `buf` ((num_envs, stride) uint8, C-contiguous; may be a
+        pinned tensor's .numpy()). The C side keeps the pointer: hold on to `buf`."""
+        lay = cview_layout(w)
+        if (buf.dtype != np.uint8 or buf.shape != (self.num_envs, lay["stride"])
+                or not buf.flags["C_CONTIGUOUS"]):
+            raise ValueError(f"critic view buffer must be ({self.num_envs}, {lay['stride']}) uint8, "
+                             f"C-contiguous; got {buf.shape} {buf.dtype}")
+        _lib.bcv_bind_cview.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
+        _lib.bcv_bind_cview.restype = ctypes.c_int
+        if _lib.bcv_bind_cview(ctypes.c_void_p(self._h), buf.ctypes.data, int(w)) != 0:
+            raise ValueError(f"the simulator refused critic-view crop {w}")
+        self.cview, self.cview_w = buf, int(w)
 
     def set_opponent(self, env_index: int, team: int = -1, bot: int | str = 0,
                      map_index: int = -1) -> None:
@@ -425,12 +597,28 @@ class BattlecodeVecEnv:
     def step_raw(self, kind: np.ndarray, n_steps: np.ndarray, dirs: np.ndarray,
                  split_k: np.ndarray, send_dirs: np.ndarray | None = None,
                  sonar: np.ndarray | None = None,
-                 protocol: np.ndarray | None = None) -> tuple[Observation, Closures, EpisodeStats]:
+                 protocol: np.ndarray | None = None,
+                 ids: np.ndarray | None = None) -> tuple[Observation, Closures, EpisodeStats]:
         """Steps with structured actions, for action spaces of your own design.
 
         kind: 0 move, 1 split, 2 suicide. dirs holds absolute directions
         (0 N, 1 E, 2 S, 3 W), the first `n_steps` of each row being used.
+        ids (optional): the codec id each action stands for, -1 unknown, for the
+        action-history plane (BC_AHIST); without it every action counts as unknown.
         """
+        if ids is not None:
+            np.copyto(self._a_kind, kind)
+            np.copyto(self._a_steps, n_steps)
+            np.copyto(self._a_dirs, dirs)
+            np.copyto(self._a_split, split_k)
+            send, value, proto = self._sonar_args(send_dirs, sonar, protocol)
+            ids_ = np.ascontiguousarray(ids, dtype=np.int32)
+            _lib.bcv_step_ids.argtypes = [ctypes.c_void_p] + [ctypes.c_void_p] * 8
+            _lib.bcv_step_ids(ctypes.c_void_p(self._h), self._a_kind.ctypes.data,
+                              self._a_steps.ctypes.data, self._a_dirs.ctypes.data,
+                              self._a_split.ctypes.data, send.ctypes.data, value.ctypes.data,
+                              proto.ctypes.data, ids_.ctypes.data)
+            return self.observation(), self._closures(), self._episodes()
         np.copyto(self._a_kind, kind)
         np.copyto(self._a_steps, n_steps)
         np.copyto(self._a_dirs, dirs)
@@ -441,6 +629,13 @@ class BattlecodeVecEnv:
                       self._a_split.ctypes.data, send.ctypes.data, value.ctypes.data,
                       proto.ctypes.data)
         return self.observation(), self._closures(), self._episodes()
+
+    def env_maps(self) -> np.ndarray:
+        """(num_envs,) int32: the index (into this env's map list) of each env's current game."""
+        out = np.zeros(self.num_envs, np.int32)
+        _lib.bcv_env_maps.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        _lib.bcv_env_maps(ctypes.c_void_p(self._h), out.ctypes.data)
+        return out
 
     def last_splits(self, env_index: int) -> np.ndarray:
         """Splits in `env_index` during the last step, as (parent, child, k) rows.

@@ -149,7 +149,7 @@ REWARD_V6 = {**REWARD_V5, "eliminated": -1.0, "team_units": 0.3, "foe_units": -0
 # team reward and it is meant to come out of the critic (a counterfactual baseline
 # conditioned on the acting dragon), not out of the reward.
 REWARD_V8 = {
-    "v8_win": 1.0, "v8_len": 1.0, "v8_top3": 1.0, "v8_kill": 1.0, "v8_exp": 1.0,
+    "v8_win": 1.0, "v8_len": 1.0, "v8_queen": 1.0, "v8_kill": 1.0, "v8_exp": 1.0,
     "outcome": 1.0,
 }
 

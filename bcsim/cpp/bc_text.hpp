@@ -434,7 +434,7 @@ struct TurnDriver {
     int cursor = 0;
     bool round_open = false;
 
-    void start(const MapData& m, uint32_t seed) {
+    void start(const MapData& m, uint64_t seed) {
         g.reset(m, seed);
         cursor = 0;
         round_open = false;

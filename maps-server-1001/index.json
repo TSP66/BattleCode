@@ -1,0 +1,58 @@
+[
+ {
+  "id": 28,
+  "name": "weakhold",
+  "size": "40 15",
+  "file": "weakhold.map",
+  "source_game": 807016,
+  "pearl_ranges": "zeroed in replay"
+ },
+ {
+  "id": 29,
+  "name": "Australia",
+  "size": "64 64",
+  "file": "australia.map",
+  "source_game": 807010,
+  "pearl_ranges": "zeroed in replay"
+ },
+ {
+  "id": 30,
+  "name": "Islands",
+  "size": "56 40",
+  "file": "islands.map",
+  "source_game": 807011,
+  "pearl_ranges": "zeroed in replay"
+ },
+ {
+  "id": 31,
+  "name": "Maze",
+  "size": "48 24",
+  "file": "maze.map",
+  "source_game": 807012,
+  "pearl_ranges": "zeroed in replay"
+ },
+ {
+  "id": 32,
+  "name": "Stripes",
+  "size": "24 12",
+  "file": "stripes.map",
+  "source_game": 807013,
+  "pearl_ranges": "zeroed in replay"
+ },
+ {
+  "id": 33,
+  "name": "Tower Defense",
+  "size": "32 16",
+  "file": "tower_defense.map",
+  "source_game": 807014,
+  "pearl_ranges": "zeroed in replay"
+ },
+ {
+  "id": 34,
+  "name": "Around UNSW",
+  "size": "64 64",
+  "file": "around_unsw.map",
+  "source_game": 807015,
+  "pearl_ranges": "zeroed in replay"
+ }
+]

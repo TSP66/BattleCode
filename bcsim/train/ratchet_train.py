@@ -81,6 +81,13 @@ def parse() -> argparse.Namespace:
     p.add_argument("--live-share", type=float, default=0.0,
                    help="0 = off. 0.6 keeps the live maps at 60%% of training when --maps holds "
                         "invented maps as well (see MAPS_PROPOSAL.md)")
+    p.add_argument("--gen-maps", default="",
+                   help="directory of generated maps (train/loong_mapgen.py); empty = none")
+    p.add_argument("--gen-share", type=float, default=0.65,
+                   help="with --gen-maps, the generated maps' share of sampling")
+    p.add_argument("--gen-per-map", type=int, default=3, help="augmented variants per generated map")
+    p.add_argument("--pearl-hotspots", action="store_true",
+                   help="official maps' variants get symmetric pearl hotspots (augment.OFFICIAL_AUG)")
     p.add_argument("--envs", type=int, default=1024)
     p.add_argument("--steps", type=int, default=256)
     p.add_argument("--threads", type=int, default=16)
@@ -182,14 +189,10 @@ def main() -> None:
           flush=True)
 
     # ---- env
-    texts, map_w, map_names, _ = augment.build_pool(a.maps, a.aug_per_map, a.seed, 0.0,
-                                                    a.aug_original_share)
-    if a.live_maps and a.live_share > 0:
-        live = {f.stem for f in pathlib.Path(a.live_maps).glob("*.map")}
-        map_w = augment.set_group_share(map_w, map_names, live, a.live_share)
-        held = sorted(set(map_names) - live)
-        print(f"map sampling: {len(live & set(map_names))} live maps at {a.live_share:.0%}, "
-              f"{len(held)} others at {1 - a.live_share:.0%} ({', '.join(held)})", flush=True)
+    texts, map_w, map_names = augment.training_pool(
+        a.maps, a.aug_per_map, a.seed, a.aug_original_share, a.live_maps, a.live_share,
+        a.gen_maps, a.gen_share, a.gen_per_map, a.pearl_hotspots,
+        log=lambda m: print(m, flush=True))
     env = bcsim.BattlecodeVecEnv(texts, num_envs=a.envs, num_threads=a.threads, seed=a.seed,
                                  closure_capacity=max(8192, a.envs * 160), privileged=True,
                                  wide=policy.wants_wide)

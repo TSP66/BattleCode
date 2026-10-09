@@ -42,16 +42,16 @@ def load(path: str) -> tuple[LSTMPolicy, dict]:
     a = ck["args"]
     if a.get("arch") != "lstm":
         raise SystemExit(f"{path} is not an LSTM policy checkpoint")
-    net = LSTMPolicy(**{k: a[k] for k in ARCH_KEYS})
+    net = LSTMPolicy(**{k: a[k] for k in ARCH_KEYS}, in_ch=a.get("in_ch", 38), n_actions=a.get("n_actions", 48))
     net.load_state_dict(ck["net"])
     return net.eval(), ck
 
 
-def quant_rows(w: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def quant_rows(w: np.ndarray, wmax: int = WMAX) -> tuple[np.ndarray, np.ndarray]:
     w = w.reshape(w.shape[0], -1).astype(np.float64)
-    s = np.abs(w).max(axis=1) / WMAX
+    s = np.abs(w).max(axis=1) / wmax
     s[s == 0] = 1e-12
-    q = np.clip(np.round(w / s[:, None]), -WMAX, WMAX).astype(np.int16)
+    q = np.clip(np.round(w / s[:, None]), -wmax, wmax).astype(np.int16)
     return q, s.astype(np.float32)
 
 
@@ -109,6 +109,8 @@ def write(dest: pathlib.Path, blob: np.ndarray, fp: np.ndarray, a: dict, source:
         "#pragma once\n#include <cstdint>\nnamespace wt {\n"
         f"constexpr int C1 = {a['c1']}, B1 = {a['b1']}, C2 = {a['c2']}, B2 = {a['b2']};\n"
         f"constexpr int SQ = {a['squeeze']}, EMB = {a['embed']}, HID = {a['hidden']}, LAYERS = {a['layers']};\n"
+        f"constexpr int IN_CH = {a.get('in_ch', 38)};   // 43: the net reads sonar v2's report planes\n"
+        f"constexpr int N_ACT = {a.get('n_actions', 48)};   // 49: the self-kill is id 48\n"
         f"constexpr std::uint32_t COUNT = {u.size}u;      // int16 weights\n"
         f"constexpr std::uint32_t N_FP = {fp.size}u;      // float parameters\n"
         f'constexpr char const SOURCE[] = "{source}";\n'

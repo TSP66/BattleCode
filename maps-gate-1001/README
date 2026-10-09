@@ -1,0 +1,7 @@
+Gate maps for runs/scratch_1001b (2026-10-01, user: more generated maps in the gate): the same 4 official
+maps as maps-gate (devil, portals, queen_of_spades, slithery_fight) + ALL 26 held-out loong maps of
+maps-test/ (seeds 9001/9002, never in maps-loong) = 30 maps, 87% generated. Symlinks. Played at 4 games
+per (opponent, map) instead of maps-gate's 12, so a gate is the same length.
+
+2026-10-03 (user, before gate g005_s5_seg1): + the 3 brand-new official maps from the API (maps-server-1003:
+islands 56x40, australia 64x64, around_unsw 64x64) = 33 maps. Gates from here on are not like-for-like with earlier ones.

@@ -8,12 +8,15 @@ blocks it produces byte for byte.
 
 from __future__ import annotations
 
+import os
 import pathlib
 import sys
 
-_PKG = None
+# UNSWBC_PKG: a directory holding another release's `unswbc` package (an unpacked wheel),
+# to compare engine versions; default the installed toolkit.
+_PKG = pathlib.Path(os.environ["UNSWBC_PKG"]) if os.environ.get("UNSWBC_PKG") else None
 for p in pathlib.Path.home().glob(".local/share/uv/tools/unswbc/lib/*/site-packages"):
-    _PKG = p
+    _PKG = _PKG or p
 if _PKG is None:
     raise SystemExit("unswbc toolkit not found")
 sys.path.insert(0, str(_PKG))
@@ -31,8 +34,9 @@ class OracleGame:
     Every (dragon_id, init_block, round_block, reply) is recorded in `log`.
     """
 
-    def __init__(self, map_text: str, policy, debug: int = 15):
+    def __init__(self, map_text: str, policy, debug: int = 15, seed: int = 0):
         self.map_text = map_text
+        self.seed = seed
         self.policy = policy
         self.log: list[dict] = []
         self.deaths: list[tuple[int, int, str]] = []
@@ -57,11 +61,11 @@ class OracleGame:
 
         self.result = self._engine.run(
             self.map_text.encode(), reply, death, spawn,
-            self.notices.append, self._debug)
+            self.notices.append, self._debug, seed=self.seed)
         return self.result
 
 
-def run_oracle(map_text: str, policy, debug: int = 15) -> OracleGame:
-    game = OracleGame(map_text, policy, debug)
+def run_oracle(map_text: str, policy, debug: int = 15, seed: int = 0) -> OracleGame:
+    game = OracleGame(map_text, policy, debug, seed)
     game.run()
     return game

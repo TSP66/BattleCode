@@ -121,3 +121,41 @@ def splitter_policy(rng: random.Random):
                                                    + (3 + {"E": 1, "W": -1}.get(d, 0))]][0])
         return f"MOVE {best}\nENDTURN\n"
     return policy
+
+
+def queen_sprint_policy(rng: random.Random, sprint_rate: float = 0.35, sonar_rate: float = 0.2):
+    """The unswbc 1.2.3 rules: survives to grow long, sprints past its free steps (ceil(L/4))
+    and into paid ones, and in most games one queen (dragon 0 or 1) gives up late, so the
+    round-500 verdict is often decided by the queen and not the longest dragon."""
+    doomed = rng.choice([0, 1]) if rng.random() < 0.7 else -1
+    doom_round = rng.randint(250, 499)
+
+    def policy(dragon_id: int, text: str) -> str:
+        b = Block(text)
+        if dragon_id == doomed and b.round >= doom_round:
+            return "JUNK\nENDTURN\n"
+        keys = list(b.tiles.keys())
+        lines = []
+        if rng.random() < 0.01 and b.length >= 8:
+            lines.append(f"SPLIT {rng.randint(2, b.length - 2)}")
+        else:
+            safe = b.safe_dirs() or ["N"]
+            weights = []
+            for d in safe:
+                dx, dy = {"N": (0, -1), "E": (1, 0), "S": (0, 1), "W": (-1, 0)}[d]
+                nb = keys[(3 + dy) * 7 + (3 + dx)]
+                weights.append((6.0 if b.tiles[nb][0] else 1.0) + (2.0 if d == b.dir else 0.0))
+            step = rng.choices(safe, weights)[0]
+            move = step
+            if rng.random() < sprint_rate:
+                free = (b.length + 3) // 4
+                n = rng.randint(2, free + 2)          # into the paid steps, sometimes past paying
+                if rng.random() < 0.7:
+                    move = step * n                   # straight on
+                else:
+                    move = step + "".join(rng.choice("NESW") for _ in range(n - 1))
+            lines.append(f"MOVE {move}")
+        if rng.random() < sonar_rate:
+            lines.append(f"SONAR {rng.randrange(0, 2**32)}")
+        return "\n".join(lines) + "\nENDTURN\n"
+    return policy

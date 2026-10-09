@@ -55,7 +55,7 @@ LEAGUE_GID_BASE = 800_000_000     # simulated games' ids, clear of any battle id
 
 def v8_weights():
     import bcsim
-    return bcsim.reward_vector({"v8_win": 1.0, "v8_len": 1.0, "v8_top3": 1.0, "v8_kill": 1.0,
+    return bcsim.reward_vector({"v8_win": 1.0, "v8_len": 1.0, "v8_queen": 1.0, "v8_kill": 1.0,
                                 "v8_exp": 1.0, "outcome": 1.0})
 
 
@@ -128,7 +128,7 @@ def phi_returns(rnd: np.ndarray, team: np.ndarray, phi: np.ndarray, alpha: float
     return out.astype(np.float32)
 
 
-def save_game(dest: pathlib.Path, rec: dict, G: dict, rounds: int) -> int:
+def save_game(dest: pathlib.Path, rec: dict, G: dict, rounds: int, map_name: str = "") -> int:
     keep = [i for i in range(len(rec["round"])) if i in G]
     if not keep:
         return 0
@@ -143,19 +143,20 @@ def save_game(dest: pathlib.Path, rec: dict, G: dict, rounds: int) -> int:
         ret=np.array([G[i] for i in keep], np.float32), rounds=np.int16(rounds),
         turn_idx=np.array(pick("turn_idx"), np.int32),
         traj_round=np.array(rec["traj_round"], np.int16), traj_team=np.array(rec["traj_team"], np.int8),
-        traj_phi=np.array(rec["traj_phi"], np.float32))
+        traj_phi=np.array(rec["traj_phi"], np.float32), map=np.array(map_name))
     return len(keep)
 
 
 # ------------------------------------------------------------------ replays
 def replay_one(args):
-    game_json, keep_p = args
+    game_json, keep_p, data = args
     import bcsim
     from bcsim.env import MAX_STEPS
     from train.critic_net import board_pack
+    from train.replay_dataset import game_map
     from train.replay_read import read
     gid = int(game_json.stem)
-    dest = DATA / f"{gid}.npz"
+    dest = pathlib.Path(data) / f"{gid}.npz"
     if dest.exists():
         return gid, "cached", 0
     try:
@@ -168,12 +169,19 @@ def replay_one(args):
         meta = json.loads(game_json.read_text())
         ids = (int(meta.get("teamAId", -1)), int(meta.get("teamBId", -1)))
     except Exception:
-        ids = (-1, -1)
+        meta, ids = {}, (-1, -1)
+    # server replays zero every TILE range; the pearls need our copy of the map and,
+    # since unswbc 1.1.0, the match's 64-bit seed (see top_fetch.py)
+    map_text = game_map(rp.map_text)
+    if map_text is None:
+        return gid, "no copy of the map", 0
     rng = np.random.default_rng(gid)
-    env = bcsim.BattlecodeVecEnv([rp.map_text], num_envs=1, num_threads=1, seed=0,
+    env = bcsim.BattlecodeVecEnv([map_text], num_envs=1, num_threads=1, seed=0,
                                  random_pearl_seed=False, max_rounds=500, privileged=True, board=True)
     env.set_potential_gamma(GAMMA)
     env.set_reward_v8(True, KAPPA)
+    if meta.get("seed"):
+        env.set_pearl_seed64(0, int(meta["seed"], 16))
     obs = env.reset()
     R = Returns(v8_weights())
     rec = defaultdict(list)
@@ -228,22 +236,34 @@ def replay_one(args):
     if status != "ok":
         # a return needs the game's real ending; a diverged game has none we trust
         return gid, status, 0
-    n = save_game(dest, rec, G, rp.rounds)
+    name = next((l[9:].strip() for l in map_text.splitlines() if l.startswith("MAP_NAME ")), "")
+    n = save_game(dest, rec, G, rp.rounds, name)
     return gid, ("ok" if not R.mismatch else "ok (closure count mismatch)"), n
 
 
 def replays(a) -> None:
     DATA.mkdir(parents=True, exist_ok=True)
     jobs, seen = [], set()
-    for folder in sorted((ROOT / "runs/replays").iterdir()):
+    folders = ([ROOT / "runs/replays" / f for f in a.folders.split(",") if f] if a.folders
+               else sorted((ROOT / "runs/replays").iterdir()))
+    skip_teams = {int(x) for x in a.exclude_teams.split(",") if x}
+    dropped = 0
+    for folder in folders:
         g = folder / "games"
         if not g.is_dir():
             continue
         for j in sorted(g.glob("*.json")):
             if j.stem in seen or not j.with_suffix(".replay").exists():
                 continue
+            if skip_teams:
+                m = json.loads(j.read_text())
+                if {m.get("teamAId"), m.get("teamBId")} & skip_teams:
+                    dropped += 1
+                    continue
             seen.add(j.stem)
-            jobs.append((j, a.keep))
+            jobs.append((j, a.keep, str(DATA)))
+    if skip_teams:
+        print(f"{dropped} games dropped for teams {sorted(skip_teams)}", flush=True)
     if a.max_games:
         rng = np.random.default_rng(0)
         jobs = [jobs[i] for i in rng.choice(len(jobs), min(a.max_games, len(jobs)), replace=False)]
@@ -283,17 +303,29 @@ def league(a) -> None:
     agents = read_agents(a)
     ids = league_ids([n_ for n_, _ in agents])
     maps_dir = pathlib.Path(a.maps)
-    names = sorted(f.stem for f in maps_dir.glob("*.map"))
-    texts = [(maps_dir / f"{n_}.map").read_text() for n_ in names]
+    weights = None
+    if a.gen_maps or a.per_map:
+        # the ratchet's own pool (augment.training_pool): official maps with variants,
+        # generated maps at --gen-share
+        from train import augment
+        texts, weights, names = augment.training_pool(
+            str(maps_dir), a.per_map, a.seed, 0.25, "", 0.0, a.gen_maps, a.gen_share,
+            a.gen_per_map, a.pearl_hotspots, log=lambda m: print(m, flush=True))
+    else:
+        names = sorted(f.stem for f in maps_dir.glob("*.map"))
+        texts = [(maps_dir / f"{n_}.map").read_text() for n_ in names]
     pairs = list(itertools.combinations(range(len(agents)), 2))
     rng = np.random.default_rng(a.seed)
     E = a.envs
     actors = [Actor(str(p_), dev, E * 160) for _, p_ in agents]
     print(f"{len(agents)} agents ({', '.join(n_ for n_, _ in agents)}), {len(pairs)} pairs, "
-          f"{len(names)} maps, {a.games} games, sonar on", flush=True)
+          f"self-play {a.self_play:.0%}, {len(texts)} maps, {a.games} games, sonar on, "
+          f"into {DATA}", flush=True)
     env = bcsim.BattlecodeVecEnv(texts, num_envs=E, num_threads=a.threads, seed=a.seed,
                                  closure_capacity=max(8192, E * 160), privileged=True, board=True,
                                  sonar=True, grid=True, wide=any(x.wants_wide for x in actors))
+    if weights is not None:
+        env.set_map_weights(weights)
     env.set_potential_gamma(GAMMA)
     env.set_reward_v8(True, KAPPA)
     side_a = np.zeros(E, np.int64)                  # agent playing team 0 in each env
@@ -301,18 +333,32 @@ def league(a) -> None:
 
     def assign(envs):
         for e in envs:
-            i, j = pairs[rng.integers(len(pairs))]
-            if rng.random() < 0.5:
-                i, j = j, i
+            if rng.random() < a.self_play:
+                i = j = int(rng.integers(len(agents)))   # one Actor, both sides: states key on (env, uid)
+            else:
+                i, j = pairs[rng.integers(len(pairs))]
+                if rng.random() < 0.5:
+                    i, j = j, i
             side_a[e], side_b[e] = i, j
 
     assign(range(E))
-    R = Returns(v8_weights())
     recs = [defaultdict(list) for _ in range(E)]
+    seen = np.zeros(E, np.int64)
     obs = env.reset()
-    done = kept = 0
+    # resume: a restart with the same seed continues numbering after the games on disk
+    # instead of overwriting them
+    base = LEAGUE_GID_BASE + a.seed * 100_000
+    have = [int(f.stem) - base for f in DATA.glob("*.npz") if 0 <= int(f.stem) - base < 100_000]
+    done = max(have) + 1 if have else 0
+    if done:
+        print(f"resuming after {done} games already in {DATA} for seed {a.seed}", flush=True)
+    kept = 0
     t0 = time.time()
+    stop = pathlib.Path(a.stop_file) if a.stop_file else None
     while done < a.games:
+        if stop is not None and stop.exists():
+            print(f"stop file {stop} found", flush=True)
+            break
         grid = torch.from_numpy(env.grid).to(dev)
         local = torch.from_numpy(obs.local).to(dev)
         scalar = torch.from_numpy(obs.scalar).to(dev)
@@ -333,47 +379,52 @@ def league(a) -> None:
         pos = {e: j for j, e in enumerate(pick.tolist())}
         for e in range(E):
             r_ = recs[e]
-            row = -1
             r_["traj_round"].append(int(obs.round[e]))
             r_["traj_team"].append(int(obs.team[e]))
             r_["traj_phi"].append(float(obs.priv[e, bcsim.PRIV_BASE:].sum()))
             if e in pos:
-                r_["turn_idx"].append(len(r_["traj_round"]) - 1)
+                # at most --cap positions a game, a uniform sample of the game (reservoir):
+                # an uncapped long game held thousands of 32 KB boards per env, and the
+                # 18-plane board OOM-killed this three times on 2026-09-29. The target is
+                # phi_returns over traj_*, so a slot needs no per-dragon bookkeeping.
+                seen[e] += 1
                 j, tm = pos[e], int(obs.team[e])
-                row = len(r_["round"])
-                r_["local"].append(obs.local[e].astype(np.float16))
-                r_["scalar"].append(obs.scalar[e][:len(bcsim.SCALARS)].copy())
-                r_["priv"].append(obs.priv[e].copy())
-                r_["round"].append(int(obs.round[e]))
-                r_["team"].append(tm)
-                r_["board_bits"].append(bits[j])
-                r_["board_tail"].append(tail[j])
-                me, them = (side_a[e], side_b[e]) if tm == 0 else (side_b[e], side_a[e])
-                r_["team_self"].append(ids[agents[me][0]])
-                r_["team_foe"].append(ids[agents[them][0]])
-            R.turn(e, int(obs.uid[e]), row)
+                slot_ = len(r_["round"]) if len(r_["round"]) < a.cap else int(rng.integers(seen[e]))
+                if slot_ < a.cap:
+                    me, them = (side_a[e], side_b[e]) if tm == 0 else (side_b[e], side_a[e])
+                    vals = {"turn_idx": len(r_["traj_round"]) - 1, "local": obs.local[e].astype(np.float16),
+                            "scalar": obs.scalar[e][:len(bcsim.SCALARS)].copy(), "priv": obs.priv[e].copy(),
+                            "round": int(obs.round[e]), "team": tm, "board_bits": bits[j].copy(),
+                            "board_tail": tail[j].copy(), "team_self": ids[agents[me][0]],
+                            "team_foe": ids[agents[them][0]]}
+                    for k_, v_ in vals.items():
+                        if slot_ == len(r_[k_]):
+                            r_[k_].append(v_)
+                        else:
+                            r_[k_][slot_] = v_
         obs, closures, eps = env.step(action.to(torch.int32).cpu().numpy())
         if len(closures.env):
-            R.close(closures)
             for e_, u_, d_ in zip(closures.env.tolist(), closures.uid.tolist(), closures.done.tolist()):
                 if d_:
                     for act in actors:
                         act.release(e_, u_)
         for row in eps.as_dicts():
             e, winner, rounds = int(row["env"]), int(row["winner"]), int(row["rounds"])
-            G: dict = {}
-            R.finish(e, G)
             r_, recs[e] = recs[e], defaultdict(list)
+            seen[e] = 0
+            # the stored per-dragon return is unused (targets come from traj_phi at fit time)
+            G = {i: 0.0 for i in range(len(r_["round"]))}
             r_["outcome"] = [1 if winner < 0 else (0 if winner == tm else 2) for tm in r_["team"]]
             if r_["round"] and done < a.games:
-                kept += save_game(DATA / f"{LEAGUE_GID_BASE + a.seed * 100_000 + done}.npz", r_, G, rounds)
+                mi = int(row["map"])
+                kept += save_game(DATA / f"{base + done}.npz", r_, G, rounds,
+                                  names[mi] if 0 <= mi < len(names) else "")
                 done += 1
             for act in actors:
                 act.release_env(e)
             assign([e])
             if done % 100 == 0 and done:
-                print(f"  {done}/{a.games} games, {kept:,} positions, {time.time() - t0:.0f}s, "
-                      f"closure mismatches {R.mismatch}", flush=True)
+                print(f"  {done}/{a.games} games, {kept:,} positions, {time.time() - t0:.0f}s", flush=True)
     env.close()
     print(f"{done} games, {kept:,} positions into {DATA}", flush=True)
 
@@ -402,6 +453,12 @@ def pretrain(a) -> None:
     rng = np.random.default_rng(0)
     prev = torch.load(OUT / "pretrained.pt", map_location="cpu", weights_only=False) if a.resume else None
     slots = TeamSlots(prev["slots"]) if prev else TeamSlots()
+    # the PPO learner's row exists from the start (ratchet_lstm_train seeds it from the
+    # agent it starts as), and every league agent of this critic's registry has one
+    slots.slot(LEARNER_ID, add=True)
+    for _name, _id in sorted((json.loads(IDS.read_text()) if IDS.exists() else {}).items(),
+                             key=lambda kv: kv[1]):
+        slots.slot(_id, add=True)
     KEYS = ("local", "scalar", "priv", "board_bits", "board_tail", "round", "outcome",
             "team_self", "team_foe", "ret")
 
@@ -445,7 +502,13 @@ def pretrain(a) -> None:
     n_priv = Vd["priv"].shape[1]
     n_phi = 0
     n_sc = Vd["scalar"].shape[1]
-    board_ch = bcsim.BOARD_CH
+    # the board layout comes from the data: 11 planes (10 packed) before 2026-09-29, 18 (12) after
+    n_bin = Vd["board_bits"].shape[1] * 8 // (64 * 64)
+    board_ch = n_bin + Vd["board_tail"].shape[1]
+    if a.d4 and board_ch != 18:
+        raise SystemExit(f"--d4 needs the 18-plane board; this data has {board_ch}")
+    print(f"board: {board_ch} planes ({n_bin} packed){'; D4 augmentation' if a.d4 else ''}"
+          f"{'; local window ZEROED' if a.drop_local else ''}", flush=True)
     print(f"{len(tr_files)} training games, {len(val_files)} held out ({len(Vd['ret']):,} positions); "
           f"<= {a.per_game} positions a game; priv {n_priv} + phi {n_phi}", flush=True)
     net = BoardCritic(bcsim.N_CHANNELS, n_sc, 1, board_ch, n_priv=n_priv, n_phi=n_phi,
@@ -464,9 +527,23 @@ def pretrain(a) -> None:
         sched = torch.optim.lr_scheduler.OneCycleLR(opt, a.lr, total_steps=steps, pct_start=0.03)
         best_prev = None
 
-    def fwd(D, ix):
-        b = board_unpack(D["board_bits"][ix], D["board_tail"][ix], board_ch, 64, device=dev)
-        return net(D["local"][ix].float(), D["scalar"][ix].float(), torch.ones(len(ix), 1, device=dev),
+    from train import d4 as D4
+
+    def fwd(D, ix, aug=False):
+        b = board_unpack(D["board_bits"][ix], D["board_tail"][ix], board_ch, 64, device=dev, n_binary=n_bin)
+        loc, sc = D["local"][ix].float(), D["scalar"][ix].float()
+        if aug:
+            # a random flip/rotation per position (train/d4.py, exact against the engine);
+            # the partner planes are read raw, so they go back to 0..255 for the transform
+            fx, fy, tr = D4.random_syms(len(ix), dev)
+            W = torch.round(sc[:, D4.SC_MW] * 64).long(); H = torch.round(sc[:, D4.SC_MH] * 64).long()
+            b[:, 14:18] *= 255.0
+            b = D4.board(b, W, H, fx, fy, tr)
+            b[:, 14:18] /= 255.0
+            loc, sc = D4.local(loc, fx, fy, tr), D4.scalars(sc, fx, fy, tr)
+        if a.drop_local:
+            loc = torch.zeros_like(loc)
+        return net(loc, sc, torch.ones(len(ix), 1, device=dev),
                    D["priv"][ix].float(), b, D["team_self"][ix], D["team_foe"][ix],
                    None, D["round"][ix].float())
 
@@ -490,7 +567,7 @@ def pretrain(a) -> None:
             for s0 in range(0, len(perm), a.batch):
                 ix = perm[s0:s0 + a.batch]
                 with torch.autocast("cuda", dtype=torch.bfloat16):
-                    logits, v = fwd(Dc, ix)
+                    logits, v = fwd(Dc, ix, aug=a.d4)
                 lv = F.mse_loss(v.float(), Dc["ret"][ix])
                 lc = F.cross_entropy(logits.float(), Dc["outcome"][ix].long(), label_smoothing=a.smooth)
                 loss = lv + a.ce_weight * lc
@@ -527,31 +604,47 @@ def pretrain(a) -> None:
         print(json.dumps(row), flush=True)
         if best is None or row["val_mse"] < best:
             best = row["val_mse"]
-            tmp = OUT / "pretrained.pt.tmp"
+            name = f"pretrained_{a.tag}.pt" if a.tag else "pretrained.pt"
+            tmp = OUT / (name + ".tmp")
             torch.save({"critic": net.state_dict(), "slots": slots.as_dict(), "n_priv": n_priv,
                         "n_phi": n_phi, "resid_scale": 2.0, "board_ch": board_ch, "n_scalars": n_sc,
                         "gamma": GAMMA, "kappa": KAPPA, "alpha": a.alpha, "target": "phi_returns", "log": log,
+                        "drop_local": bool(a.drop_local), "d4": bool(a.d4),
                         "ids": json.loads(IDS.read_text()) if IDS.exists() else {}}, tmp)
-            tmp.replace(OUT / "pretrained.pt")      # atomic: a trainer starting now reads old or new, never half
-    (OUT / "pretrain_log.json").write_text(json.dumps(log, indent=1))
+            tmp.replace(OUT / name)      # atomic: a trainer starting now reads old or new, never half
+    (OUT / (f"pretrain_log_{a.tag}.json" if a.tag else "pretrain_log.json")).write_text(json.dumps(log, indent=1))
 
 
 def main() -> None:
+    global OUT, DATA, IDS
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--out-dir", default=str(OUT),
+                   help="critic dir: data_phi/, ids.json, pretrained.pt (runs/critic_v8b from 2026-09-28: "
+                        "reward changed, so the old data_phi must not be mixed in)")
     sub = p.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("replays")
     r.add_argument("--keep", type=float, default=0.03, help="share of turns recorded")
     r.add_argument("--workers", type=int, default=10)
     r.add_argument("--max-games", type=int, default=0)
+    r.add_argument("--folders", default="", help="runs/replays subfolders, comma separated; empty = all")
+    r.add_argument("--exclude-teams", default="", help="contest team ids whose games are skipped")
     lg = sub.add_parser("league")
     lg.add_argument("--agents", default="")
     lg.add_argument("--agents-file", default="")
     lg.add_argument("--maps", default=str(ROOT / "maps-all"))
     lg.add_argument("--games", type=int, default=3000)
     lg.add_argument("--keep", type=float, default=0.03)
+    lg.add_argument("--cap", type=int, default=300, help="stored positions per game at most (reservoir)")
     lg.add_argument("--envs", type=int, default=256)
     lg.add_argument("--threads", type=int, default=12)
     lg.add_argument("--seed", type=int, default=0)
+    lg.add_argument("--self-play", type=float, default=0.0, help="share of games an agent plays itself")
+    lg.add_argument("--per-map", type=int, default=0, help="augmented variants per official map (0 = none)")
+    lg.add_argument("--gen-maps", default="", help="generated maps (train/loong_mapgen.py)")
+    lg.add_argument("--gen-share", type=float, default=0.65)
+    lg.add_argument("--gen-per-map", type=int, default=3)
+    lg.add_argument("--pearl-hotspots", action="store_true")
+    lg.add_argument("--stop-file", default="", help="finish cleanly once this file exists")
     t = sub.add_parser("pretrain")
     t.add_argument("--epochs", type=int, default=6)
     t.add_argument("--batch", type=int, default=1024)
@@ -562,12 +655,19 @@ def main() -> None:
     t.add_argument("--ce-weight", type=float, default=0.5)
     t.add_argument("--max-games", type=int, default=0)
     t.add_argument("--per-game", type=int, default=150, help="positions taken from each game at most")
-    t.add_argument("--alpha", type=float, default=0.95, help="discount per ROUND of the team's potential changes")
+    t.add_argument("--alpha", type=float, default=0.95,
+                   help="discount per ROUND of the team's potential changes (0.95; 0.96 on 28-29 Sep)")
+    t.add_argument("--tag", default="", help="write pretrained_<tag>.pt (and its log) instead of pretrained.pt")
+    t.add_argument("--drop-local", action="store_true", help="zero the acting dragon's 7x7 window (ablation)")
+    t.add_argument("--d4", action="store_true", help="random flip/rotation per training position (18-plane data)")
     t.add_argument("--resume", action="store_true", help="continue from pretrained.pt (more epochs); it is "
                    "replaced only when held-out mse beats its best")
     t.add_argument("--chunk-games", type=int, default=1500, help="games loaded at a time")
     t.add_argument("--val-cap", type=int, default=150_000, help="held-out positions kept resident")
     a = p.parse_args()
+    OUT = pathlib.Path(a.out_dir)
+    DATA = OUT / "data_phi"
+    IDS = OUT / "ids.json"
     {"replays": replays, "league": league, "pretrain": pretrain}[a.cmd](a)
 
 

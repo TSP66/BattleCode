@@ -1,0 +1,121 @@
+[
+ {
+  "id": 9,
+  "name": "Schooltime",
+  "sizeLabel": "60\u00d740",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 20,
+  "name": "Portals",
+  "sizeLabel": "32\u00d716",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 21,
+  "name": "Slithery Fight",
+  "sizeLabel": "63\u00d727",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 7,
+  "name": "Queen Of Spades",
+  "sizeLabel": "25\u00d735",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 32,
+  "name": "Stripes",
+  "sizeLabel": "24\u00d712",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 4,
+  "name": "Default",
+  "sizeLabel": "32\u00d732",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 33,
+  "name": "Tower Defense",
+  "sizeLabel": "32\u00d716",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 30,
+  "name": "Islands",
+  "sizeLabel": "56\u00d740",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 34,
+  "name": "Around UNSW",
+  "sizeLabel": "64\u00d764",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 11,
+  "name": "Trophy",
+  "sizeLabel": "25\u00d725",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 28,
+  "name": "weakhold",
+  "sizeLabel": "40\u00d715",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 31,
+  "name": "Maze",
+  "sizeLabel": "48\u00d724",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 17,
+  "name": "Prisoners Dilemma",
+  "sizeLabel": "32\u00d716",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 29,
+  "name": "Australia",
+  "sizeLabel": "64\u00d764",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 19,
+  "name": "Autarky",
+  "sizeLabel": "54\u00d718",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 13,
+  "name": "Devil",
+  "sizeLabel": "32\u00d716",
+  "active": true,
+  "private": false
+ },
+ {
+  "id": 15,
+  "name": "Trauma",
+  "sizeLabel": "48\u00d724",
+  "active": true,
+  "private": false
+ }
+]

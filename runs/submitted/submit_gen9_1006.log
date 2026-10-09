@@ -1,0 +1,41 @@
+== export (ffl)
+904,352 int16 weights + 8,278 floats -> /home/thomaspetty/BattleCode/lstmbot/weights.hpp (anchors/gen9.pt iter 1143; temperature 0.1 folded)
+// source: anchors/gen9.pt iter 1143
+== a. package
+zip 1780 KB: ok
+== b. parity (simulator + checkpoint)
+
+2243 turns. grid (excluding self): 0 turns differ; self channels: 6
+turns with a difference, by channel: [('self_body', 6), ('self_index', 6), ('self_tail', 3)]
+logits vs the checkpoint (legal actions): median max|diff| 0.0026, p99 0.0074, max 0.8905; argmax differs on 2/2243 turns (0.09%)
+argmax misses (checkpoint top-2 margin, self channels differed): 0.0006, 0.0022
+int32 accumulator peak 483,530,605 (22.52% of overflow)
+legal-move mask vs simulator: 0 of 2243 turns differ
+mlp0 scalars vs simulator: 0 of 2243 turns differ
+sonar packets vs simulator: 0 of 2243 turns differ
+far sprints played: 5, path differs from the simulator's on 0
+coverage (turns): own portal report sent 95, portal planes lit 218, enemy queen in packet 527, queen relayed (age > 0) 254, team packets heard (rep_len lit) 1155
+PARITY OK
+
+434 turns. grid (excluding self): 0 turns differ; self channels: 0
+turns with a difference, by channel: none
+logits vs the checkpoint (legal actions): median max|diff| 0.0023, p99 0.0059, max 0.0089; argmax differs on 1/434 turns (0.23%)
+argmax misses (checkpoint top-2 margin, self channels differed): 0.0006
+int32 accumulator peak 0 (0.00% of overflow)
+legal-move mask vs simulator: 0 of 434 turns differ
+mlp0 scalars vs simulator: 0 of 434 turns differ
+sonar packets vs simulator: 0 of 434 turns differ
+far sprints played: 0, path differs from the simulator's on 0
+coverage (turns): own portal report sent 109, portal planes lit 103, enemy queen in packet 50, queen relayed (age > 0) 33, team packets heard (rep_len lit) 120
+PARITY OK
+== c. judge sandbox games (judge clang, judge meter)
+default    net   5536  no-net 0  warnings 0  max 80.9M  team B wins after 271 rounds (by elimination) (18.6s)
+trauma     net   7902  no-net 0  warnings 0  max 81.0M  team A wins after 500 rounds (longer queen, 12 to 5) (25.8s)
+big_empty  net  18295  no-net 0  warnings 0  max 81.2M  team A wins after 500 rounds (longest dragon, 61 to 34) (1m07s)
+ALL CHECKS PASSED
+== upload
+replay viewer: Failed Installing Extensions: file:///home/thomaspetty/.local/share/uv/tools/unswbc/lib/python3.14/site-packages/unswbc/replay-viewer.vsix -- run `unswbc vscode` to retry
+uploading 9 files (1811 KB) to https://game.battlecode.au
+submitted scratch_1002-gen9 as v26 (processing)
+watch it build at https://game.battlecode.au/submissions
+recorded v26

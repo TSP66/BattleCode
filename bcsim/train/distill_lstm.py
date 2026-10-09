@@ -41,6 +41,15 @@ import time
 
 import numpy as np
 import torch
+
+# tests only: BC_EVAL_FP32=1 plays every evaluation net in fp32 (TF32 off), which is
+# batch-size invariant, unlike bf16 autocast (small batches pick other kernels)
+EVAL_FP32 = __import__("os").environ.get("BC_EVAL_FP32") == "1"
+if EVAL_FP32:
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 import torch.nn.functional as F
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -101,18 +110,26 @@ class Pool:
     rollout still separates two dragons' turns when they are regrouped.
     """
 
-    def __init__(self, n: int, layers: int, hidden: int, dev):
+    def __init__(self, n: int, layers: int, hidden: int, dev, grow: bool = False,
+                 no_action: int = NO_ACTION):
+        self.grow_on_exhaust = grow
+        self.no_action = no_action
         self.h = torch.zeros(layers, n, hidden, device=dev)
         self.c = torch.zeros(layers, n, hidden, device=dev)
-        self.prev = torch.full((n,), NO_ACTION, dtype=torch.long, device=dev)
+        self.prev = torch.full((n,), no_action, dtype=torch.long, device=dev)
         self.key: dict[tuple[int, int], int] = {}
+        # env -> its live uids, in insertion order: release_env is O(that env's dragons), not
+        # a scan of every key (2026-10-01: with ~8 game ends a step across 5 players the scan
+        # cost an evaluation several ms a step -- the fast gate's 09-28 slowdown)
+        self.by_env: dict[int, dict[int, None]] = {}
         self.env_of = np.full(n, -1, np.int64)
         self.life = np.zeros(n, np.int64)
         self.free = list(range(n - 1, -1, -1))
         self.next_life = 0
         self.exhausted = 0
 
-    def get(self, envs: np.ndarray, uids: np.ndarray) -> np.ndarray:
+    def get(self, envs: np.ndarray, uids: np.ndarray, stage=None) -> np.ndarray:
+        """`stage` (ratchet_ff_train's Stage): the fresh slots' index goes over without a sync."""
         slots = np.empty(len(envs), np.int64)
         fresh = []
         for i, (e, u) in enumerate(zip(envs.tolist(), uids.tolist())):
@@ -120,30 +137,52 @@ class Pool:
             if s is None:
                 if not self.free:
                     self.exhausted += 1
-                    self.release_env(e)          # never expected; keeps the run alive
+                    if self.grow_on_exhaust:
+                        self.grow()
+                    else:
+                        self.release_env(e)      # never expected; keeps the run alive
                 s = self.free.pop()
                 self.key[(e, u)] = s
+                self.by_env.setdefault(e, {})[u] = None
                 self.env_of[s] = e
                 self.life[s] = self.next_life
                 self.next_life += 1
                 fresh.append(s)
             slots[i] = s
         if fresh:
-            f = torch.as_tensor(fresh, device=self.h.device)
-            self.h[:, f] = 0
-            self.c[:, f] = 0
-            self.prev[f] = NO_ACTION
+            f = (stage(np.array(fresh, np.int64)) if stage is not None
+                 else torch.as_tensor(fresh, device=self.h.device))
+            if self.h.shape[0]:                 # no LSTM layers (feed-forward nets): nothing to clear, and the
+                self.h[:, f] = 0                # empty indexed write still cost ~1 ms (2026-10-05, py-spy)
+                self.c[:, f] = 0
+            self.prev[f] = self.no_action
         return slots
+
+    def grow(self) -> None:
+        """Double the slots. Evaluation keeps a dead dragon's slot until its game ends,
+        so a split-heavy game can outlast any fixed budget (gates crashed on 27-28 Sep)."""
+        n = len(self.env_of)
+        self.h = torch.cat([self.h, torch.zeros_like(self.h)], 1)
+        self.c = torch.cat([self.c, torch.zeros_like(self.c)], 1)
+        self.prev = torch.cat([self.prev, torch.full_like(self.prev, self.no_action)])
+        self.env_of = np.concatenate([self.env_of, np.full(n, -1, np.int64)])
+        self.life = np.concatenate([self.life, np.zeros(n, np.int64)])
+        self.free = list(range(2 * n - 1, n - 1, -1)) + self.free
 
     def release(self, e: int, u: int) -> None:
         s = self.key.pop((e, u), None)
         if s is not None:
             self.env_of[s] = -1
             self.free.append(s)
+            us = self.by_env.get(e)
+            if us is not None:
+                us.pop(u, None)
+                if not us:
+                    del self.by_env[e]
 
     def release_env(self, e: int) -> None:
-        for k in [k for k in self.key if k[0] == e]:
-            self.release(*k)
+        for u in list(self.by_env.get(e, ())):
+            self.release(e, u)
 
 
 class LSTMGreedy:
@@ -154,22 +193,65 @@ class LSTMGreedy:
 
     def __init__(self, net: LSTMPolicy, dev, num_envs: int, per_env: int = 160):
         self.net, self.dev = net, dev
-        self.pool = Pool(num_envs * per_env, net.layers, net.hidden, dev)
+        self.pool = Pool(num_envs * per_env, net.layers, net.hidden, dev, grow=True,
+                         no_action=getattr(net, "no_action", NO_ACTION))
 
     def rows(self, obs, rows, grid):
         idx = np.flatnonzero(rows)
-        sl = self.pool.get(idx, obs.uid[idx])
+        act = self._forward(idx, obs.uid[idx], torch.from_numpy(grid[idx]).to(self.dev),
+                            torch.from_numpy(obs.mask[idx]).to(self.dev).bool())
+        return act.to(torch.int32).cpu().numpy()
+
+    def _forward(self, env_idx, uids, grid_t, mask_t):
+        # one forward for both paths, so the fast one cannot drift from rows()
+        sl = self.pool.get(env_idx, uids)
         s = torch.as_tensor(sl, device=self.dev)
+        # a policy trained on a smaller grid, in a bigger-grid simulator (train/panel.py): its own
+        # window is a crop -- both span -G/2 .. G-G/2-1 about the head (bc_memory.hpp HALF)
+        gm = getattr(self, "grid_model", 0)
+        if gm and grid_t.shape[-1] > gm:
+            off = grid_t.shape[-1] // 2 - gm // 2
+            grid_t = grid_t[..., off:off + gm, off:off + gm]
         state = [(self.pool.h[l, s], self.pool.c[l, s]) for l in range(self.net.layers)]
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-            logits, _, new = self.net(torch.from_numpy(grid[idx]).to(self.dev), self.pool.prev[s], state)
-            m = torch.from_numpy(obs.mask[idx]).to(self.dev).bool()
-            act = masked_logits(logits.float(), m).argmax(1)
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=not EVAL_FP32):
+            env_temp = getattr(self, "env_temp", None)
+            if env_temp is not None:
+                # a temperature per game (roundrobin_all --temps): (num_envs,) array, 0 = greedy
+                tr = torch.as_tensor(np.asarray(env_temp)[np.asarray(env_idx)], device=grid_t.device,
+                                     dtype=torch.float32)
+                if getattr(self.net, "temp_in", False):
+                    t_in = torch.where(tr > 0, tr, self.net.temp_default.to(tr.device))
+                    logits, _, new = self.net(grid_t, self.pool.prev[s], state, temp=t_in)
+                else:
+                    logits, _, new = self.net(grid_t, self.pool.prev[s], state)
+                ml = masked_logits(logits.float(), mask_t)
+                samp = torch.multinomial(torch.softmax(ml / tr.clamp(min=1e-3)[:, None], 1), 1).squeeze(1)
+                act = torch.where(tr > 0, samp, ml.argmax(1))
+            else:
+                t_ = float(getattr(self, "temp", 1.0 if getattr(self, "sample", False) else 0.0))
+                if getattr(self.net, "temp_in", False):
+                    # a temperature-conditioned policy is told the temperature it plays at; greedy play
+                    # gets net.temp_default (gate player(): the smallest temperature it trained at)
+                    logits, _, new = self.net(grid_t, self.pool.prev[s], state, temp=t_ if t_ > 0 else None)
+                else:
+                    logits, _, new = self.net(grid_t, self.pool.prev[s], state)
+                ml = masked_logits(logits.float(), mask_t)
+                # temp > 0: draw from softmax(logits / temp) instead of taking the top move (train/panel.py
+                # --temp, the greedy-vs-sampled gap); sample=True is the older spelling of temp 1
+                act = (torch.multinomial(torch.softmax(ml / t_, 1), 1).squeeze(1) if t_ > 0
+                       else ml.argmax(1))
+            if getattr(self.net, "uniform", False):
+                # the uniform-random player (train/make_random.py): uniform over the legal moves at any
+                # temperature, the gate's greedy play included
+                ml = masked_logits(torch.zeros_like(logits.float()), mask_t)
+                act = torch.multinomial(torch.softmax(ml, 1), 1).squeeze(1)
+            if getattr(self, "keep_probs", False):       # sonar v2: what its packets carry
+                self.last_probs = torch.softmax(ml, 1)
         for l, (h, c) in enumerate(new):
             self.pool.h[l, s] = h.float()
             self.pool.c[l, s] = c.float()
         self.pool.prev[s] = act
-        return act.to(torch.int32).cpu().numpy()
+        return act
 
     def forget(self, env):
         self.pool.release_env(int(env))

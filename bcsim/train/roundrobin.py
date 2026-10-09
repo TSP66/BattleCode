@@ -144,7 +144,7 @@ def main() -> None:
     acts, archs = {}, {}
     for name, path in agents:
         net, ck = load_net(path, dev)
-        if ck["args"].get("arch") == "lstm":
+        if ck["args"].get("arch") in ("lstm", "ff", "ffl"):
             from train.distill_lstm import LSTMGreedy
             acts[name] = LSTMGreedy(net, dev, n_envs)
         elif getattr(net, "recurrent", False):

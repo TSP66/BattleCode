@@ -11,6 +11,7 @@
 #include "bc_bots.hpp"
 #include "bc_memory.hpp"
 #include "bc_reward8.hpp"
+#include "bc_sonar2.hpp"
 
 #include <atomic>
 #include <cmath>
@@ -81,7 +82,7 @@ enum RewardComp {
     // trainer's weight for each is 1.0. Banked separately only so the dashboard
     // can still attribute a move to a term -- that attribution is what caught
     // v3's kamikaze collapse inside 30 iterations.
-    RW_V8_WIN, RW_V8_LEN, RW_V8_TOP3, RW_V8_KILL, RW_V8_EXP,
+    RW_V8_WIN, RW_V8_LEN, RW_V8_QUEEN, RW_V8_KILL, RW_V8_EXP,
     // reward v8: the true game result, +1 / 0 / -1, and the only term in v8
     // that does not telescope. Paid to every transition still open at the end,
     // which is survivors plus the dragons that died on the wiping turn. A
@@ -120,15 +121,43 @@ constexpr int NUM_MSGS_CAP = 4;
 // subtracts is the same Phi the reward paid. A second implementation in torch
 // would drift, and the drift would be invisible -- it would look like ordinary
 // critic error. See REWARDS.md.
-constexpr int PRIV_BASE = 8;
-constexpr int PRIV_COUNT = PRIV_BASE + bc8::N_TERMS;   // 13
+constexpr int PRIV_BASE = 10;   // the global summary (bc_obs.hpp), then Phi's terms
+constexpr int PRIV_COUNT = PRIV_BASE + bc8::N_TERMS;   // 15
 // board planes: own body, own heads, enemy body, enemy heads, pearls,
-// inside-the-map, kelp on the north edge, kelp on the west edge, then the
-// acting dragon's own body and head, and how soon a pearl is due per tile
-// (see VecEnv::observe). Only the critic reads these, and it never ships, so
-// they may say things a deployed bot cannot know.
-constexpr int BOARD_CH = 11;
+// inside-the-map, kelp on the north edge, kelp on the west edge, the acting
+// dragon's own body and head, portal on the north edge, portal on the west
+// edge (0-11 binary, bit-packed by critic_net.board_pack), then how soon a pearl
+// is due per tile, who still moves this round, and where each portal leads
+// (12-17, 0..255: countdown, still-to-move, north-edge partner x/y, west-edge
+// partner x/y; see VecEnv::observe), then (18-19, binary, 2026-10-01) our queen's body
+// and theirs. Only the critic reads these, and it never ships, so they may say things a
+// deployed bot cannot know. 11 planes until 2026-09-29, 18 until 2026-10-01.
+constexpr int BOARD_CH = 20;
 constexpr int BOARD_MAX = 64;
+
+// The critic view (user, 2026-10-01): what the PPO critic reads, written straight into one
+// compact byte row per turn instead of the 72 KB board. CV_CH view planes, taken from the
+// board by CV_SRC (the portal-partner planes 14-17 are not in it), as two parts:
+//   crop    W x W cells about the acting dragon's head, WRAPPED around the map like the
+//           policy's own window (the world is a torus); W odd, 1..63. View planes 0..CV_BITS-1
+//           (binary) are bit-packed, element k = (plane * W + row) * W + col at byte k / 8,
+//           bit k % 8 (numpy packbits bitorder="little"); the rest follow as W*W bytes each.
+//   coarse  the whole 64 x 64 board in map coordinates, 4 x 4 average-pooled to 16 x 16:
+//           per plane and block, (sum of the 16 values + 8) / 16 rounded down, a binary
+//           plane counting 255 per set cell. A byte per value, plane-major.
+// The row is padded to a multiple of 16 bytes. train/cview.py decodes it; the layout
+// functions below are the only definition of it (bcv_cview_layout exports them).
+constexpr int CV_CH = 16;            // view planes
+constexpr int CV_BITS = 14;          // of which the first 14 are binary
+// view plane -> board plane: the binary ones (0-11, the queens 18-19), then countdown and
+// still-to-move (12-13). 14 planes (board 0-13) until 2026-10-01.
+constexpr int CV_SRC[CV_CH] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 18, 19, 12, 13};
+constexpr int CV_COARSE = BOARD_MAX / 4;
+inline size_t cview_bits_bytes(int w) { return ((size_t)CV_BITS * w * w + 7) / 8; }
+inline size_t cview_coarse_off(int w) { return cview_bits_bytes(w) + (size_t)(CV_CH - CV_BITS) * w * w; }
+inline size_t cview_stride(int w) {
+    return (cview_coarse_off(w) + (size_t)CV_CH * CV_COARSE * CV_COARSE + 15) / 16 * 16;
+}
 // Steps a single MOVE action may carry. The engine has no cap of its own (a
 // sprint is limited by length), so replaying real games needs more:
 // libbcvec_replay.so is built with -DBC_MAX_STEPS=64.
@@ -138,8 +167,63 @@ constexpr int BOARD_MAX = 64;
 constexpr int MAX_STEPS = BC_MAX_STEPS;
 constexpr int CODEC_MOVES = 3 + 9 + 27;   // relative paths of length 1, 2, 3
 constexpr int CODEC_SPLITS = 9;
-constexpr int CODEC_ACTIONS = CODEC_MOVES + CODEC_SPLITS;
+// The self-kill (user, 2026-09-30: cheji bt plays it on ~0.7% of turns with legal
+// moves left): a reply with no MOVE and no SPLIT, which the engine answers by
+// killing the dragon (NO_VALID_ACTION). Id 48, in the next-generation (BC_SONAR2)
+// build only, so every 48-action library and checkpoint is unchanged.
+#ifdef BC_SONAR2
+constexpr int CODEC_SUICIDE = 1;
+#else
+constexpr int CODEC_SUICIDE = 0;
+#endif
+// Splits sized from the parent's end (user, 2026-10-01: cheji bt's splits of len-2 and len-3,
+// 0.12% of its turns, had no id): the parent keeps its head and 1 or 2 segments, the rest
+// leaves. Ids 49 (k = len - 2) and 50 (k = len - 3), after the self-kill, in BC_XSPLIT builds
+// only (the 15x15 next generation), so every 49-action library and checkpoint is unchanged.
+#ifdef BC_XSPLIT
+static_assert(CODEC_SUICIDE == 1, "BC_XSPLIT ids follow the self-kill: build with BC_SONAR2");
+constexpr int CODEC_XSPLITS = 2;
+#else
+constexpr int CODEC_XSPLITS = 0;
+#endif
+// Far sprints (user, 2026-10-02: every tile of the 7x7 window must be reachable in one move,
+// e.g. to kill a queen 4-6 steps away; the 1-3 step paths above reach only Manhattan <= 3).
+// Ids 51..74, after the extra splits, in BC_FARSPRINT builds only: one per window tile 4-6
+// steps away (FAR_TARGETS, row-major from the front row), each walked by the shortest path
+// INSIDE the window over open edges (no kelp, no portal) through free tiles -- the target
+// itself may be another dragon's head -- with ties broken forward, left, right, back at
+// every step (VecEnv::far_path). At most FAR_MAX_STEPS (8) steps. Computed from the window alone,
+// so a deployed bot computes the same path.
+#ifdef BC_FARSPRINT
+static_assert(CODEC_XSPLITS == 2, "BC_FARSPRINT ids follow the extra splits: build with BC_XSPLIT");
+constexpr int CODEC_FAR = 24;
+#else
+constexpr int CODEC_FAR = 0;
+#endif
+constexpr int CODEC_SUICIDE_ID = CODEC_MOVES + CODEC_SPLITS;             // 48
+constexpr int CODEC_XSPLIT_ID = CODEC_SUICIDE_ID + CODEC_SUICIDE;        // 49
+constexpr int CODEC_FAR_ID = CODEC_XSPLIT_ID + CODEC_XSPLITS;            // 51
+constexpr int CODEC_ACTIONS = CODEC_MOVES + CODEC_SPLITS + CODEC_SUICIDE + CODEC_XSPLITS + CODEC_FAR;
+// A far sprint's longest path: fixed, not MAX_STEPS (8 in the play libraries, 64 in the replay and
+// privileged ones), so training, gates and the bot all walk the same paths.
+constexpr int FAR_MAX_STEPS = 8;
+static_assert(MAX_STEPS >= FAR_MAX_STEPS, "far sprints need MAX_STEPS >= 8");
+inline bool codec_is_far(int id) { return id >= CODEC_FAR_ID && id < CODEC_FAR_ID + CODEC_FAR; }
+// The far targets as ego offsets (ox right, oy back; the dragon faces oy < 0).
+struct FarTargets {
+    int8_t ox[24] = {}, oy[24] = {};
+    constexpr FarTargets() {
+        int k = 0;
+        for (int y = -3; y <= 3; y++)
+            for (int x = -3; x <= 3; x++) {
+                const int d = (x < 0 ? -x : x) + (y < 0 ? -y : y);
+                if (d >= 4 && d <= 6) { ox[k] = (int8_t)x; oy[k] = (int8_t)y; k++; }
+            }
+    }
+};
+inline constexpr FarTargets FAR_TARGETS{};
 const int CODEC_SPLIT_K[CODEC_SPLITS] = {2, 3, 4, 5, 6, 8, 12, 16, -1};  // -1 = half
+const int CODEC_XSPLIT_KEEP[2] = {2, 3};                                  // k = len - keep
 
 // Structured action, which is what the engine actually takes.
 struct Action {
@@ -192,11 +276,27 @@ struct VecConfig {
     // PPO gamma to make it potential-based shaping.
     float potential_gamma = 1.0f;
     // Compute the reward v8 components as well. Off by default: it costs a
-    // per-turn scan for the sorted top three and it only means anything to a
-    // trainer that weights RW_V8_*, so the league and every old run are
-    // untouched. The v1-v7 components keep being emitted either way.
+    // per-turn scan of the team and it only means anything to a trainer that
+    // weights RW_V8_*. The v1-v7 components keep being emitted either way.
     bool reward_v8 = false;
     bc8::Params v8;
+    // The queen guard (user, 2026-10-03: the queens were dying careless deaths, 7 of 11 by their
+    // own self-kill): a queen's mask drops the self-kill and every move onto another dragon's
+    // head (a certain head-on). Kelp, visible bodies and unaffordable paid steps the mask
+    // already drops; a portal's far side stays unseen. Off by default, so every library user
+    // and checkpoint plays exactly as before. A queen it would leave with no legal action keeps
+    // the ordinary mask (fill_mask).
+    bool queen_guard = false;
+    // The queen dead-end mask (user, 2026-10-09: "mask all moves that ensure queen death ... only allow
+    // this if there is no other choice"; fill_mask, VecEnv::queen_deadend_mask): a queen's moves that
+    // leave her, on a copy, dead or in a dead end she can see (PP_QUEEN_DEADEND's test) are dropped
+    // while another move is not. Off by default: every run and checkpoint plays as before.
+    // Level 2 (2026-10-09, match 1532070: the queen walked into a pocket lined by her own body and
+    // died splitting k=2 when one keep-2 split would have let her out): her own body is a wall
+    // where it cannot have moved off before she gets there, and when every move is fatal the
+    // splits after which (on a copy) some move is not fatal are kept and every other action
+    // dropped. Level 1 is the original, unchanged.
+    int queen_deadend = 0;
     // How a v8 component is attributed. INTERVAL pays each dragon the change in
     // Phi since its OWN last turn, which telescopes per agent and is exact
     // potential shaping. OWN pays it only the change across its own action.
@@ -288,7 +388,15 @@ struct Env {
     uint64_t episode = 0;
     std::vector<AgentAcc> agents;
     std::mt19937_64 rng;
+    // set_pearl_seed64: the next episode's match seed
+    bool pearl64_pending = false;
+    uint64_t pearl64 = 0;
     int acting = -1;             // dragon index whose turn it is
+    // BC_SONAR2: bit t set = team t speaks the v2 team packet (bc_sonar2.hpp).
+    // Both bits for self-play; one for a game against a frozen or replayed team.
+    uint8_t s2_mask = 0;
+    // the packet each dragon (by index) sent last, so its own echo can be dropped
+    std::vector<uint64_t> s2_last;
     size_t events_seen = 0;
     // evaluation: one team played by a scripted bot, and a pinned map
     int scripted_team = -1;
@@ -324,6 +432,18 @@ struct Env {
         mem_live.clear();
         mem_free.clear();
         for (int i = 0; i < (int)mem_pool.size(); i++) mem_free.push_back(i);
+    }
+
+    // A dragon's memory if it has one yet, else null (read-only: the packet builder).
+    const DragonMemory* mem_peek(int dragon_id) const {
+        if (dragon_id < 0 || dragon_id >= (int)mem_slot.size() || mem_slot[(size_t)dragon_id] < 0) return nullptr;
+        return &mem_pool[(size_t)mem_slot[(size_t)dragon_id]];
+    }
+
+    // The same, writable (BC_PORTALREP: apply() records a portal trip into it).
+    DragonMemory* mem_mut(int dragon_id) {
+        if (dragon_id < 0 || dragon_id >= (int)mem_slot.size() || mem_slot[(size_t)dragon_id] < 0) return nullptr;
+        return &mem_pool[(size_t)mem_slot[(size_t)dragon_id]];
     }
 
     // The acting dragon's memory, allocated and cleared on first use.
@@ -381,6 +501,13 @@ public:
 
     int num_envs() const { return cfg_.num_envs; }
 
+    // Env i's next episode uses this match seed (a server game's "seed"); one episode
+    // only. Call before reset().
+    void set_pearl_seed64(int i, uint64_t seed) {
+        envs_[i].pearl64 = seed;
+        envs_[i].pearl64_pending = true;
+    }
+
     // Map sampling weights, one per map; takes effect at each env's next episode.
     void set_map_weights(const double* w) {
         map_cdf_.assign(maps_.size(), 0.0);
@@ -396,6 +523,10 @@ public:
     // (-1 = none) to a scripted bot. Also take effect at the next episode, so
     // call reset() after setting them.
     void set_potential_gamma(float g) { cfg_.potential_gamma = g; }
+    void set_queen_guard(bool on) { cfg_.queen_guard = on; }
+    bool queen_guard() const { return cfg_.queen_guard; }
+    void set_queen_deadend(int level) { cfg_.queen_deadend = level; }
+    int queen_deadend() const { return cfg_.queen_deadend; }
     // Reward v8. kappa is the single knob for how strong the shaping is against
     // the outcome; the lambdas are shares and do not change it.
     void set_reward_v8(bool on, float kappa, int credit = VecConfig::V8_INTERVAL) {
@@ -432,6 +563,14 @@ public:
     // acting dragon's team. For offline critic studies; costs a full write
     // per step, so leave it unbound in training.
     void bind_board(uint8_t* board) { b_board_ = board; }
+    // Optional: the critic view (see cview_stride), one row of cview_stride(w) bytes per env.
+    // Returns false (and binds nothing) for an even or out-of-range w; nullptr unbinds.
+    bool bind_cview(uint8_t* buf, int w) {
+        if (buf && (w < 1 || w > 63 || w % 2 == 0)) return false;
+        b_cview_ = buf;
+        cview_w_ = buf ? w : 0;
+        return true;
+    }
     void set_sonar(bool on) { cfg_.sonar = on; }
     // Optional: the remembered map as wide_cfg::N_WIDE floats per row, two
     // stacked scales of six planes in the acting dragon's own frame
@@ -439,6 +578,27 @@ public:
     void bind_wide(float* wide) { b_wide_ = wide; }
     // Optional: the LSTM policy's 38 x 14 x 14 grid (bc_memory.hpp grid_cfg).
     void bind_grid(float* grid) { b_grid_ = grid; }
+
+    // BC_SONAR2. Which teams of env i speak the v2 packet (bit per team), and the
+    // caller's per-env probabilities for the action it is about to send, 4 floats
+    // per env: P(split), P(sprint), P(first step left), P(first step right).
+    void set_sonar2(int env_index, int mask) { envs_[env_index].s2_mask = (uint8_t)(mask & 3); }
+    void bind_intent(float* intent) { b_intent_ = intent; }
+    // The packet env i's acting dragon would send now (parity checks of the bot).
+    uint64_t s2_preview(int env_index) const {
+        const Env& e = envs_[env_index];
+        return e.acting < 0 ? 0ull : s2_packet(e, env_index, e.acting);
+    }
+
+    // Starts env i's next game now (with its pinned map and pending pearl seed),
+    // abandoning the one in progress. For replay-driven training, where a game is
+    // left at the first turn the replay stops matching.
+    void restart(int env_index) {
+        Env& e = envs_[env_index];
+        begin_episode(e, env_index);
+        advance(e, env_index);
+        observe(e, env_index);
+    }
 
     void reset() {
         closures_.clear();
@@ -452,13 +612,16 @@ public:
 
     // Applies one action per env, advances to the next acting dragon and
     // writes the new observations.
-    void step(const Action* actions) {
+    // ids: the codec ids the actions came from (bcv_step_codec), for the action history; null
+    // (structured actions, e.g. replays) records each as unknown.
+    void step(const Action* actions, const int* ids = nullptr) {
         closures_.clear();
         episodes_.clear();
         std::vector<std::vector<Closure>> per_thread(cfg_.num_threads);
         std::vector<std::vector<EpisodeStat>> stats(cfg_.num_threads);
         run_parallel_t([&](int i, int t) {
             Env& e = envs_[i];
+            note_action(e, ids ? ids[i] : -1);
             apply(e, i, actions[i], per_thread[t]);
             advance(e, i, &per_thread[t], &stats[t]);
             observe(e, i);
@@ -468,6 +631,18 @@ public:
     }
 
     const std::vector<Closure>& closures() const { return closures_; }
+
+    // The acting dragon's action history (BC_AHIST plane; DragonMemory::ahist): before it acts,
+    // its history takes the PREVIOUS last action at 0.5 and everything older halves, then this
+    // action becomes the last. So at its next turn the plane holds a(t-2) 0.5, a(t-3) 0.25, ...
+    static void note_action(Env& e, int id) {
+        if (e.acting < 0) return;
+        DragonMemory* dm = e.mem_mut(e.game.dragons[(size_t)e.acting].id);
+        if (!dm) return;
+        for (float& v : dm->ahist) v *= 0.5f;
+        if (dm->last_act >= 0 && dm->last_act < DragonMemory::AHIST_MAX) dm->ahist[(size_t)dm->last_act] += 0.5f;
+        dm->last_act = id;
+    }
 
     // Test hooks: the acting dragon, and the protocol block it would be sent.
     int acting_dragon_id(int env_index) const {
@@ -479,15 +654,39 @@ public:
         return e.acting < 0 ? std::string() : render_round_block(e.game, e.acting);
     }
     bool finished(int env_index) const { return envs_[env_index].game.finished; }
+    // the map (index into the env's map list) each env's current game is on
+    int env_map(int env_index) const { return envs_[(size_t)env_index].map_index; }
     const std::vector<EpisodeStat>& episodes() const { return episodes_; }
 
     // Turns a codec action id into the structured action, using the acting
     // dragon's own length for the split sizes.
     Action decode(int env_index, int action_id) const {
         const Env& e = envs_[env_index];
-        const Dragon& d = e.game.dragons[e.acting];
-        return decode_for(d, action_id);
+        return decode_full(e.game, e.acting, action_id);
     }
+    // decode_for, and the far sprints, whose path depends on the window (bc_obs.hpp)
+    static Action decode_full(const Game& g, int di, int action_id);
+    // The far sprint k's path for dragon di, into dirs; its length, 0 when none (bc_obs.hpp).
+    static int far_path(const Game& g, int di, int k, char* dirs);
+    static void far_paths(const Game& g, int di, int* n_out, char* dirs_out);   // all of them, one search
+    int far_path_of(int env_index, int k, char* dirs) const {
+        const Env& e = envs_[(size_t)env_index];
+        return e.acting < 0 ? 0 : far_path(e.game, e.acting, k, dirs);
+    }
+    int dragon_len(int env_index, int dragon_id) const {
+        const Game& g = envs_[(size_t)env_index].game;
+        if (dragon_id < 0 || dragon_id >= (int)g.dragons.size() || !g.dragons[(size_t)dragon_id].alive) return 0;
+        return g.dragons[(size_t)dragon_id].len;
+    }
+    int dragon_head(int env_index, int dragon_id) const {
+        const Game& g = envs_[(size_t)env_index].game;
+        if (dragon_id < 0 || dragon_id >= (int)g.dragons.size() || !g.dragons[(size_t)dragon_id].alive) return -1;
+        return g.dragons[(size_t)dragon_id].head();
+    }
+    // Whether a move along dirs is legal as the dragon can tell (kelp and visible bodies block,
+    // a portal ends what it can check, paid steps must be affordable) -- fill_mask's rule.
+    // heads_block (the queen guard): another dragon's head blocks too -- stepping onto it is a head-on.
+    static bool path_legal(const Game& g, int di, const char* dirs, int n, bool heads_block = false);
 
     // What each codec move would do right now, tried on a copy of the game
     // (the env itself is untouched). Used to label replays, never to act.
@@ -596,6 +795,27 @@ public:
         }
     }
 
+    // Perfect play (supervised_learning.md, user 2026-10-02): whether the acting dragon's
+    // position is one of the user's "perfect play" situations, judged from the true game
+    // but only where the dragon's own 7x7 window shows everything the judgement needs.
+    // Returns the kind (PP_*) and sets acts[0..CODEC_ACTIONS) to 1 on every correct action
+    // (all zero for PP_NONE). Read-only; defined in bc_obs.hpp. train/perfect_play.py.
+    enum { PP_NONE = 0, PP_BLANK = 1, PP_QUEEN_KILL = 2, PP_LATE_SUICIDE = 3, PP_TRAPPED_QUEEN = 4,
+           PP_PEARL = 5, PP_KEEP_WALL = 6, PP_QUEEN_DEADEND = 7, PP_KINDS = 8 };
+    static constexpr int PP_LATE_FROM = 481;     // late suicide: rounds 481 .. PP_LATE_TO
+    static constexpr int PP_LATE_TO = 498;       // (499 is the last; the queen must move after)
+    static constexpr int PP_LATE_RADIUS = 2;     // our queen's head within this (Chebyshev) of ours
+    int perfect(int env_index, uint8_t* acts) const;
+
+    // A synthetic position (train/perfect_play.py, user 2026-10-02: generate the situations,
+    // never from the training maps): env i starts a new game on its map, then its dragons are
+    // replaced by n given ones -- team[j], len[j] cells (head first) at cells[...] in order, len 0
+    // = a dragon that is already dead (ids 0 and 1 are the queens) -- pearls on the given cells,
+    // the round set, and dragon `acting` to move, observed with a fresh memory. False (env
+    // untouched past its restart) when a body is not a chain of steps, overlaps, or is off the map.
+    bool set_scenario(int env_index, int round, int n, const int* team, const int* len, const int* cells,
+                      int n_pearls, const int* pearls, int acting);
+
     // Deaths the last action caused in env_index: (dragon id, reason, killer
     // id or -1, team) rows, at most cap. Read right after a step.
     int last_deaths(int env_index, int32_t* out, int cap) const {
@@ -641,7 +861,12 @@ public:
         a.send_dirs = 0;
         a.protocol = 0;
         for (int k = 0; k < SONAR_DIRS; k++) a.sonar_dir[k] = 0ull;
-        if (action_id < 0 || action_id >= CODEC_ACTIONS) return a;
+        if (action_id >= CODEC_XSPLIT_ID && action_id < CODEC_XSPLIT_ID + CODEC_XSPLITS) {
+            a.kind = 1;
+            a.split_k = (int16_t)(d.len - CODEC_XSPLIT_KEEP[action_id - CODEC_XSPLIT_ID]);
+            return a;
+        }
+        if (action_id < 0 || action_id >= CODEC_MOVES + CODEC_SPLITS) return a;   // the self-kill
         if (action_id < CODEC_MOVES) {
             int n, rest;
             if (action_id < 3) { n = 1; rest = action_id; }
@@ -679,8 +904,11 @@ private:
             e.map_index = (int)(e.rng() % maps_.size());
         }
         e.map = &maps_[e.map_index];
-        const uint32_t seed = cfg_.random_pearl_seed ? (uint32_t)e.rng()
-                                                     : MT19937::DEFAULT_SEED;
+        uint64_t seed = cfg_.random_pearl_seed ? (uint64_t)e.rng() : 0;
+        if (e.pearl64_pending) {
+            seed = e.pearl64;
+            e.pearl64_pending = false;
+        }
         e.game.reset(*e.map, seed);
         e.game.record_events = true;
         e.cursor = 0;
@@ -696,6 +924,7 @@ private:
         }
         e.episode++;
         e.mem_clear();          // every dragon of the new episode starts blank
+        e.s2_last.clear();
         e.agents.assign(e.game.dragons.size(), AgentAcc());
         for (size_t i = 0; i < e.agents.size(); i++) {
             e.agents[i].uid = e.uid_of(e.game.dragons[i].id);
@@ -729,6 +958,69 @@ private:
         }
     }
 
+    // ---- sonar v2: what dragon di says after its move
+    uint64_t s2_packet(const Env& e, int index, int di) const {
+        const Game& g = e.game;
+        const MapData& m = *e.map;
+        const Dragon& d = g.dragons[di];
+        s2::Packet p;
+        p.hx = d.head() % m.w;
+        p.hy = d.head() / m.w;
+        p.len = d.len;
+        p.facing = dir_index(d.facing);
+        p.queen = Game::is_queen(d);
+        // in its own 7x7 window: the enemy queen if any of it shows (its head, else its
+        // nearest segment); else, relayed, where it was last known if that is at most
+        // s2::RELAY_ROUNDS old (seen or heard); else the nearest enemy head -- Chebyshev on the torus
+        int best = 99, best_q = 99;
+        for (int oy = -VISION; oy <= VISION; oy++)
+            for (int ox = -VISION; ox <= VISION; ox++) {
+                const int x = m.wrapx(p.hx + ox), y = m.wrapy(p.hy + oy);
+                const int t = m.idx(x, y);
+                const int16_t occ = g.owner[t];
+                if (occ < 0 || g.dragons[occ].team == d.team) continue;
+                const int dist = std::max(std::abs(ox), std::abs(oy));
+                if (Game::is_queen(g.dragons[occ])) {
+                    const int rank = g.head_at[t] ? -1 : dist;      // its head beats any segment
+                    if (rank < best_q) { best_q = rank; p.enemy = p.enemy_queen = true; p.ex = x; p.ey = y; }
+                } else if (g.head_at[t] && best_q == 99 && dist < best) {
+                    best = dist; p.enemy = true; p.ex = x; p.ey = y;
+                }
+            }
+        if (best_q == 99) {
+            const DragonMemory* dm = e.mem_peek(d.id);
+            if (dm && dm->queen[1].round > mem_cfg::NEVER && g.round - dm->queen[1].round <= s2::RELAY_ROUNDS) {
+                p.enemy = p.enemy_queen = true;
+                p.ex = dm->queen[1].x;
+                p.ey = dm->queen[1].y;
+                p.queen_age = g.round - dm->queen[1].round;
+                p.came_from = dm->queen[1].from;
+            }
+        }
+#ifdef BC_PORTALREP
+        // the far side of its last portal, from its memory as it stands now (the same call
+        // observe() made for its own report this turn, on the same memory)
+        (void)index;
+        if (const DragonMemory* dm = e.mem_peek(d.id)) {
+            int tiles = 0, pearls = 0;
+            if (dm->trip_far_side(g.round, s2::PORTAL_BOX_MAX, s2::PORTAL_PEARL_STEPS, tiles, pearls)) {
+                p.portal = true;
+                p.px = dm->trip.ax;
+                p.py = dm->trip.ay;
+                p.pdir = dm->trip.dir;
+                p.pbox = s2::portal_box_bucket(tiles);
+                p.ppearls = std::min(pearls, 3);
+            }
+        }
+#else
+        if (b_intent_) {
+            const float* in = b_intent_ + (size_t)index * 4;
+            p.p_split = in[0]; p.p_sprint = in[1]; p.p_left = in[2]; p.p_right = in[3];
+        }
+#endif
+        return s2::encode(p, d.team, g.round);
+    }
+
     // ---- applying one action
     void apply(Env& e, int index, const Action& a, std::vector<Closure>& out) {
         if (e.acting < 0) return;
@@ -755,7 +1047,17 @@ private:
         // copies the parent's protocol to the child, so setting it afterwards
         // would leave a child born this turn on the legacy protocol and unable
         // to receive a payload wider than 32 bits.
-        if (cfg_.sonar) d.protocol = 3;
+        const bool s2 = ((e.s2_mask >> d.team) & 1) != 0;
+        if (cfg_.sonar || s2) d.protocol = 3;
+        // The v2 packet is what the dragon knows when it writes its reply, i.e.
+        // BEFORE its move (the engine casts the ray after it): its head, length,
+        // facing and window as they are now, and the probabilities of the move.
+        uint64_t s2_pkt = 0;
+        if (s2) {
+            s2_pkt = s2_packet(e, index, di);
+            if (e.s2_last.size() <= (size_t)di) e.s2_last.resize((size_t)di + 1, 0);
+            e.s2_last[(size_t)di] = s2_pkt;
+        }
         // An explicit declaration wins over the cfg_.sonar default, so a caller
         // can drive one dragon on the legacy protocol while others speak 3.
         if (a.protocol > 0) d.protocol = (uint8_t)a.protocol;
@@ -763,7 +1065,34 @@ private:
             char dirs[MAX_STEPS];
             const int n = a.n_steps > MAX_STEPS ? MAX_STEPS : a.n_steps;
             for (int i = 0; i < n; i++) dirs[i] = dir_char(a.dirs[i]);
+#ifdef BC_PORTALREP
+            // the portal this move goes through, walked on the map before the move: the tile it
+            // is entered from, the direction, and the tile it lets out on (see DragonMemory::Trip)
+            DragonMemory::Trip trip;
+            int crossings = 0;
+            {
+                const MapData& m = *e.map;
+                int x = d.head() % m.w, y = d.head() / m.w;
+                for (int i = 0; i < n; i++) {
+                    bool vertical; int ex, ey;
+                    edge_on_side(m, x, y, dirs[i], vertical, ex, ey);
+                    const int edge = m.idx(ex, ey);
+                    const bool portal = (vertical ? m.v_kind[edge] : m.h_kind[edge]) == EDGE_PORTAL;
+                    int nx, ny;
+                    if (!tile_after_step(m, x, y, dirs[i], nx, ny)) break;   // kelp: it dies
+                    if (portal) {
+                        crossings++;
+                        trip = DragonMemory::Trip{x, y, dir_index(dirs[i]), nx, ny, true};
+                    }
+                    x = nx; y = ny;
+                }
+            }
+#endif
             e.game.move(di, dirs, n);
+#ifdef BC_PORTALREP
+            if (crossings == 1 && e.game.dragons[di].alive)
+                if (DragonMemory* dm = e.mem_mut(e.game.dragons[di].id)) dm->trip = trip;
+#endif
         } else if (a.kind == 1) {
             e.game.split(di, a.split_k);
         } else {
@@ -773,7 +1102,12 @@ private:
         // seed its own child: split() has already created the child by here, and
         // it inherits protocol 3, so a ray that reaches it delivers the full 64
         // bits on the child's very first turn.
-        if (e.game.dragons[di].alive) {
+        if (e.game.dragons[di].alive && s2) {
+            // The v2 team packet, in all four directions; whatever else the caller
+            // asked this dragon to say is replaced by it.
+            static const char DIR_OF[SONAR_DIRS] = {'N', 'E', 'S', 'W'};
+            for (int k = 0; k < SONAR_DIRS; k++) e.game.cast_sonar(di, DIR_OF[k], s2_pkt);
+        } else if (e.game.dragons[di].alive) {
             static const char DIR_OF[SONAR_DIRS] = {'N', 'E', 'S', 'W'};
             // Whatever the caller asked for explicitly.
             for (int k = 0; k < SONAR_DIRS; k++)
@@ -808,24 +1142,17 @@ private:
         }
     }
 
-    // Reward v8 wants the three longest as well: the win condition is the
-    // longest and the tie-break is the total, so the free parameter worth
-    // pricing is whether there is a second and third real dragon. A running
-    // top-three beats sorting, since a team can hold 60-odd dragons.
+    // What reward v8 reads off a team: the verdict's three quantities (queen,
+    // longest, total), the living queens, and the coverage lead.
     static bc8::TeamShape team_shape(const Env& e, uint8_t team) {
         bc8::TeamShape s;
-        int t1 = 0, t2 = 0, t3 = 0;
         for (const Dragon& d : e.game.dragons) {
             if (!d.alive || d.team != team) continue;
             s.total += d.len;
             s.units++;
-            const int l = d.len;
-            if (l > t1) { t3 = t2; t2 = t1; t1 = l; }
-            else if (l > t2) { t3 = t2; t2 = l; }
-            else if (l > t3) { t3 = l; }
+            s.longest = std::max(s.longest, d.len);
+            if (Game::is_queen(d)) { s.queen = d.len; s.queens++; }
         }
-        s.longest = t1;
-        s.top3 = t1 + t2 + t3;
         s.covered = e.cover_n[team];
         return s;
     }
@@ -1135,7 +1462,11 @@ private:
 
     // ---- observations
     void observe(Env& e, int index);
+    void write_cview(const uint8_t* bd, int hx, int hy, int w, int h, uint8_t* out) const;
     void fill_mask(Env& e, int index);
+    static bool queen_in_dead_end(const Game& gg, int di, int hx, int hy, bool own_walls = false);
+    static int queen_move_fatal(const Game& g, int di, const char* dirs, int n, int hx, int hy, bool own_walls);
+    static void queen_deadend_mask(const Game& g, int di, uint8_t* mask, int level = 1);
 
     // ---- threading
     void start_workers() {
@@ -1190,8 +1521,11 @@ private:
 
     float* b_priv_ = nullptr;
     uint8_t* b_board_ = nullptr;
+    uint8_t* b_cview_ = nullptr;
+    int cview_w_ = 0;
     float* b_wide_ = nullptr;
     float* b_grid_ = nullptr;
+    float* b_intent_ = nullptr;
     float* b_local_ = nullptr;
     float* b_scalar_ = nullptr;
     uint64_t* b_msgs_ = nullptr;

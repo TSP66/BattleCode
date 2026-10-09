@@ -15,3 +15,14 @@
 {"version": "v19", "name": "ratchet_v8_sab-gen7", "ckpt": "runs/submitted/v19.pt", "source": "/home/thomaspetty/BattleCode/runs/ratchet_v8_sab/anchors/gen7.pt", "bot": "lstmbot", "time": "2026-09-26T13:38"}
 {"version": "v20", "name": "ratchet_v8_sab-gen8", "ckpt": "runs/submitted/v20.pt", "source": "/home/thomaspetty/BattleCode/runs/ratchet_v8_sab/anchors/gen8.pt", "bot": "lstmbot", "time": "2026-09-26T16:52"}
 {"version": "v21", "name": "ratchet_v8_sab-gen9", "ckpt": "runs/submitted/v21.pt", "source": "/home/thomaspetty/BattleCode/runs/ratchet_v8_sab/anchors/gen9.pt", "bot": "lstmbot", "time": "2026-09-26T20:06"}
+{"version": "v22", "name": "ratchet_v8_sab-gen10", "ckpt": "runs/submitted/v22.pt", "source": "/home/thomaspetty/BattleCode/runs/ratchet_v8_sab/anchors/gen10.pt", "bot": "lstmbot", "time": "2026-09-28T09:27"}
+{"version": "v23", "name": "g011_s17-seg0", "ckpt": "runs/submitted/v23.pt", "source": "/home/thomaspetty/BattleCode/runs/ratchet_v8_sab/cands/g011_s17/seg0.pt", "bot": "lstmbot", "time": "2026-09-28T10:23"}
+{"version": "v24", "name": "ratchet_v9-gen1", "ckpt": "runs/submitted/v24.pt", "source": "/home/thomaspetty/BattleCode/runs/ratchet_v9/anchors/gen1.pt", "bot": "lstmbot", "time": "2026-09-29T02:35"}
+{"version": "v25", "name": "scratch_1002-g009_s9_latest", "ckpt": "runs/submitted/v25.pt", "source": "/home/thomaspetty/BattleCode/runs/submit_src/scratch_1002/g009_s9_latest.pt", "bot": "lstmbot", "time": "2026-10-05T11:33"}
+{"version": "v26", "name": "scratch_1002-gen9", "ckpt": "runs/submitted/v26.pt", "source": "/home/thomaspetty/BattleCode/runs/scratch_1002/anchors/gen9.pt", "bot": "lstmbot", "time": "2026-10-06T12:30"}
+{"version": "v27", "name": "scratch_1002-gen10", "ckpt": "runs/submitted/v27.pt", "source": "/home/thomaspetty/BattleCode/runs/submit_src/scratch_1002/gen10.pt", "bot": "lstmbot", "time": "2026-10-07T10:50"}
+{"version": "v28", "name": "scratch_1002-gen11", "ckpt": "runs/submitted/v28.pt", "source": "/home/thomaspetty/BattleCode/runs/scratch_1002/anchors/gen11.pt", "bot": "lstmbot", "time": "2026-10-07T14:15"}
+{"version": "v29", "name": "scratch_1002-gen12", "ckpt": "runs/submitted/v29.pt", "source": "/home/thomaspetty/BattleCode/runs/scratch_1002/anchors/gen12.pt", "bot": "lstmbot", "time": "2026-10-08T18:43"}
+{"version": "v30", "name": "scratch_1002-g013_s13_seg0", "ckpt": "runs/submitted/v30.pt", "source": "/home/thomaspetty/BattleCode/runs/submit_src/scratch_1002/g013_s13_seg0.pt", "bot": "lstmbot", "time": "2026-10-09T10:02"}
+{"version": "v31", "name": "scratch_1002-g013_s13_seg1", "ckpt": "runs/submitted/v31.pt", "source": "/home/thomaspetty/BattleCode/runs/submit_src/scratch_1002/g013_s13_seg1.pt", "bot": "lstmbot", "time": "2026-10-09T11:15"}
+{"version": "v32", "name": "scratch_1002-g013_s13_seg2", "ckpt": "runs/submitted/v32.pt", "source": "/home/thomaspetty/BattleCode/runs/submit_src/scratch_1002/g013_s13_seg2.pt", "bot": "lstmbot", "time": "2026-10-09T13:00"}

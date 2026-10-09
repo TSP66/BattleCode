@@ -62,9 +62,43 @@ inline void gemm_t(i16 const* A, int M, int K, i16 const* B, int P, i32* C) {
     }
 }
 
-// P must be a multiple of 4; the tile is the largest that divides it.
+// R output rows x TV vectors of 4 cells per tile: each B vector loaded once serves R rows, which
+// is what the judge's table rewards (2 points per SIMD op, 1 per local get/set): ~1.2 points a MAC
+// at 4 x 8 against ~1.7 for one row at a time (2026-10-05, the 15x15 FFL net).
+template <int R, int TV>
+inline void gemm_rt(i16 const* A, int K, i16 const* B, int P, i32* C, int i0, int v0) {
+    int const pairs = K / 2, stride = P / 4;
+    v128_t acc[R][TV];
+    for (int r = 0; r < R; r++)
+        for (int j = 0; j < TV; j++) acc[r][j] = wasm_i32x4_splat(0);
+    i16 const* a = A + (std::size_t)i0 * K;
+    v128_t const* b = reinterpret_cast<v128_t const*>(B) + v0;
+    for (int p = 0; p < pairs; p++, b += stride) {
+        v128_t s[R];
+        for (int r = 0; r < R; r++) s[r] = wasm_v128_load32_splat(a + (std::size_t)r * K + 2 * p);
+        for (int j = 0; j < TV; j++) {
+            v128_t const bj = wasm_v128_load(b + j);
+            for (int r = 0; r < R; r++) acc[r][j] = wasm_i32x4_add(acc[r][j], wasm_i32x4_dot_i16x8(s[r], bj));
+        }
+    }
+    for (int r = 0; r < R; r++)
+        for (int j = 0; j < TV; j++) wasm_v128_store(C + (std::size_t)(i0 + r) * P + (v0 + j) * 4, acc[r][j]);
+}
+
+// P must be a multiple of 4. M % 4 == 0 (every conv): 4-row tiles, 8 vectors wide, then 4, then 1
+// for what is left (228 cells = 57 vectors). M == 1 (the linear layers): one row, the widest tile
+// that divides P.
 inline void gemm(i16 const* A, int M, int K, i16 const* B, int P, i32* C) {
     int const v = P / 4;
+    if (M % 4 == 0) {
+        for (int i0 = 0; i0 < M; i0 += 4) {
+            int v0 = 0;
+            for (; v0 + 8 <= v; v0 += 8) gemm_rt<4, 8>(A, K, B, P, C, i0, v0);
+            for (; v0 + 4 <= v; v0 += 4) gemm_rt<4, 4>(A, K, B, P, C, i0, v0);
+            for (; v0 < v; v0++) gemm_rt<4, 1>(A, K, B, P, C, i0, v0);
+        }
+        return;
+    }
     if (v % 13 == 0) gemm_t<13>(A, M, K, B, P, C);
     else if (v % 8 == 0) gemm_t<8>(A, M, K, B, P, C);
     else if (v % 7 == 0) gemm_t<7>(A, M, K, B, P, C);

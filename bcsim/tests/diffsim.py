@@ -5,14 +5,17 @@ every death with its reason and round, and the final result."""
 from __future__ import annotations
 
 import ctypes
+import os
 import pathlib
 import random
 
 from oracle import OracleGame
 
-LIB = ctypes.CDLL(str(pathlib.Path(__file__).resolve().parents[1] / "bcsim" / "libbctext.so"))
+# BCSIM_TEXT_LIB: another build of the text driver (a negative control, e.g. the old rules)
+LIB = ctypes.CDLL(os.environ.get("BCSIM_TEXT_LIB") or
+                  str(pathlib.Path(__file__).resolve().parents[1] / "bcsim" / "libbctext.so"))
 LIB.bct_create.restype = ctypes.c_void_p
-LIB.bct_create.argtypes = [ctypes.c_char_p, ctypes.c_uint, ctypes.c_char_p, ctypes.c_int]
+LIB.bct_create.argtypes = [ctypes.c_char_p, ctypes.c_ulonglong, ctypes.c_char_p, ctypes.c_int]
 LIB.bct_destroy.argtypes = [ctypes.c_void_p]
 LIB.bct_next.argtypes = [ctypes.c_void_p]
 LIB.bct_round.argtypes = [ctypes.c_void_p]
@@ -28,9 +31,9 @@ LIB.bct_stats.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_longlong), ct
 STAT_NAMES = ["step", "portal_step", "sprint_step", "pearl_eaten", "pearl_spawn",
               "death_wall", "death_self", "death_other", "death_head", "death_action",
               "split_ok", "split_illegal", "split_limit", "sonar_cast", "sonar_hit",
-              "sonar_self", "sonar_lost", "blocked_spawn"]
+              "sonar_self", "sonar_lost", "blocked_spawn", "free_sprint_step"]
 
-ENGINE_SEED = 1592614637
+ENGINE_SEED = 0   # a match seed; stress.py draws one a game
 
 
 class Mismatch(Exception):
@@ -79,12 +82,13 @@ class Sim:
         return {STAT_NAMES[i]: out[i] for i in range(n)}
 
     def result(self) -> dict:
-        out = (ctypes.c_int * 9)()
+        out = (ctypes.c_int * 11)()
         LIB.bct_result(ctypes.c_void_p(self.h), out)
         return {"rounds": out[0], "winner": out[1], "end_reason": out[2],
                 "a_dragons": out[3], "b_dragons": out[4],
                 "a_length": out[5], "b_length": out[6],
-                "a_longest": out[7], "b_longest": out[8]}
+                "a_longest": out[7], "b_longest": out[8],
+                "a_queen": out[9], "b_queen": out[10]}
 
     def __del__(self):
         if getattr(self, "h", None):
@@ -154,7 +158,7 @@ def compare(map_text: str, policy, seed: int = ENGINE_SEED, label: str = "") -> 
         sim.reply(di, text)
         return text
 
-    game = OracleGame(map_text, bridge)
+    game = OracleGame(map_text, bridge, seed=seed)
     game.run()
 
     if game.notices:
@@ -173,7 +177,9 @@ def compare(map_text: str, policy, seed: int = ENGINE_SEED, label: str = "") -> 
     mismatched = {}
     for key, value in (("rounds", theirs.rounds), ("end_reason", theirs.end_reason),
                        ("a_dragons", theirs.a_dragons), ("b_dragons", theirs.b_dragons),
-                       ("a_length", theirs.a_length), ("b_length", theirs.b_length)):
+                       ("a_length", theirs.a_length), ("b_length", theirs.b_length),
+                       ("a_longest", theirs.a_longest), ("b_longest", theirs.b_longest),
+                       ("a_queen", theirs.a_queen), ("b_queen", theirs.b_queen)):
         if ours[key] != value:
             mismatched[key] = (value, ours[key])
     winner = {None: -1, "A": 0, "B": 1}[theirs.winner]
@@ -183,9 +189,20 @@ def compare(map_text: str, policy, seed: int = ENGINE_SEED, label: str = "") -> 
         raise Mismatch(f"{label} result differs (engine, ours): {mismatched}")
 
     summary = {"turns": turns, "rounds": theirs.rounds + 1, "deaths": len(theirs_deaths),
-               "dragons": len(seen_ids), "winner": theirs.winner}
+               "dragons": len(seen_ids), "winner": theirs.winner, "decided_by": _decided_by(theirs)}
     summary["stats"] = sim.stats()
     return summary
+
+
+def _decided_by(r) -> str:
+    """Which rule settled the game (the engine's own order, unswbc 1.2.3)."""
+    if r.end_reason == 0:
+        return "elimination"
+    for name, a, b in (("queen", r.a_queen, r.b_queen), ("longest", r.a_longest, r.b_longest),
+                       ("total", r.a_length, r.b_length)):
+        if a != b:
+            return name
+    return "draw"
 
 
 def _diff(theirs: str, ours: str, what: str) -> str:

@@ -4,7 +4,7 @@ Every game compares each dragon's init and round blocks byte for byte, every
 death with its reason and round, and the final result. Prints the aggregate
 rule coverage so a green run cannot hide an untested path.
 
-    python stress.py [games] [--bundled DIR] [--jobs N]
+    python stress.py [games] [--bundled DIR] [--jobs N] [--seed S]
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import genmaps
 import policies
 
 POLICIES = ["smart_policy", "survivor_policy", "portal_policy", "splitter_policy",
-            "random_policy"]
+            "random_policy", "queen_sprint_policy"]
 
 
 def one(args) -> tuple[str, dict | str]:
@@ -28,16 +28,16 @@ def one(args) -> tuple[str, dict | str]:
     rng = random.Random(seed)
     factory = getattr(policies, pol_name, None) or getattr(diffsim, pol_name)
     try:
-        return label, diffsim.compare(map_text, factory(rng), label=label)
+        return label, diffsim.compare(map_text, factory(rng), seed=rng.getrandbits(64), label=label)
     except diffsim.Mismatch as exc:
         return label, f"MISMATCH {exc}"
     except ValueError as exc:  # map the engine rewrote: not a fair comparison
         return label, f"skip: {exc}"
 
 
-def build_jobs(games: int, bundled: pathlib.Path | None):
+def build_jobs(games: int, bundled: pathlib.Path | None, seed: int = 20260921):
     jobs = []
-    rng = random.Random(20260921)
+    rng = random.Random(seed)
     pool = []
     if bundled:
         pool = [(p.name, p.read_text()) for p in sorted(bundled.glob("*.map"))]
@@ -68,12 +68,14 @@ def main() -> int:
     if "--bundled" in sys.argv:
         bundled = pathlib.Path(sys.argv[sys.argv.index("--bundled") + 1])
     jobs = int(sys.argv[sys.argv.index("--jobs") + 1]) if "--jobs" in sys.argv else 8
+    seed = int(sys.argv[sys.argv.index("--seed") + 1]) if "--seed" in sys.argv else 20260921
 
-    work = build_jobs(games, bundled)
+    work = build_jobs(games, bundled, seed)
     totals: dict[str, int] = {}
     bad: list[str] = []
     skipped = 0
     turns = 0
+    decided: dict[str, int] = {}
     t0 = time.perf_counter()
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=jobs) as pool:
@@ -85,6 +87,7 @@ def main() -> int:
                     bad.append(f"{label}: {res}")
             else:
                 turns += res["turns"]
+                decided[res["decided_by"]] = decided.get(res["decided_by"], 0) + 1
                 for k, v in res["stats"].items():
                     totals[k] = totals.get(k, 0) + v
             if n % 25 == 0 or n == len(work):
@@ -94,6 +97,7 @@ def main() -> int:
     dt = time.perf_counter() - t0
     print(f"\n{len(work) - len(bad) - skipped} games matched the engine exactly "
           f"({turns:,} dragon turns, {skipped} skipped, {dt:.0f}s)")
+    print("decided by: " + ", ".join(f"{k} {v}" for k, v in sorted(decided.items())))
     print("\nrule coverage across the run:")
     for k in sorted(totals):
         print(f"  {k:16s} {totals[k]:>12,}")

@@ -49,7 +49,10 @@ from train.net import ResBlock
 # unrecognised team id and a replay with no metadata all map to, so a critic
 # trained on replays can be used on self-play without reshaping anything.
 TEAM_UNKNOWN = 0
-N_TEAM_SLOTS = 64          # contest has far fewer than this; room to grow
+# 64 until 2026-09-28, when it turned out full: 63 contest teams from the replays took every
+# slot, so the learner and every league agent fell back to 0 (unknown). Older checkpoints
+# are padded on load (BoardCritic._load_from_state_dict).
+N_TEAM_SLOTS = 256
 
 
 def sinusoidal(x: torch.Tensor, dim: int, max_period: float = 10_000.0) -> torch.Tensor:
@@ -163,6 +166,16 @@ class BoardCritic(nn.Module):
             nn.init.zeros_(self.self_v.bias)
             self.resid = None
 
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # a checkpoint from a smaller team table: its rows keep their slots, the
+        # new ones start at zero, like unknown
+        key = prefix + "team_emb.weight"
+        w = state_dict.get(key)
+        if w is not None and w.shape[0] < self.team_emb.num_embeddings:
+            pad = w.new_zeros(self.team_emb.num_embeddings - w.shape[0], w.shape[1])
+            state_dict[key] = torch.cat([w, pad], 0)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
     def forward(self, local, scalar, context, priv, board,
                 team_self=None, team_foe=None, iteration=None, rnd=None):
         """`board` is (B, BOARD_CH, 64, 64) as float.
@@ -220,7 +233,7 @@ def team_value(logits: torch.Tensor) -> torch.Tensor:
 # one outcome -- so information about results is bounded by the number of games,
 # not positions, and the cheap axis is to record fewer turns per game. See the
 # --keep argument of team_critic extract.
-N_BINARY_PLANES = 10           # planes 0-9; plane 10 is the pearl countdown
+N_BINARY_PLANES = 12           # planes 0-11 (portals 10-11 since 2026-09-29); 12 countdown, 13 still-to-move, 14-17 portal partners
 
 
 def board_pack(board: "object") -> tuple:
@@ -231,7 +244,7 @@ def board_pack(board: "object") -> tuple:
     return bits, b[:, N_BINARY_PLANES:].copy()
 
 
-def board_unpack(bits, tail, ch: int, side: int, device=None) -> torch.Tensor:
+def board_unpack(bits, tail, ch: int, side: int, device=None, n_binary: int | None = None) -> torch.Tensor:
     """Inverse of board_pack, as float in [0, 1] ready for the conv trunk.
 
     The countdown plane is scaled by 1/255; the rest are already 0 or 1.
@@ -241,9 +254,10 @@ def board_unpack(bits, tail, ch: int, side: int, device=None) -> torch.Tensor:
     n = bits.shape[0]
     cells = side * side
     flat = ((bits.unsqueeze(-1) >> torch.arange(7, -1, -1, device=bits.device)) & 1)
-    planes = flat.reshape(n, -1)[:, :N_BINARY_PLANES * cells].float()
-    planes = planes.reshape(n, N_BINARY_PLANES, side, side)
-    rest = tail.reshape(n, ch - N_BINARY_PLANES, side, side).float() / 255.0
+    nb = N_BINARY_PLANES if n_binary is None else n_binary     # 10 on data from the 11-plane board
+    planes = flat.reshape(n, -1)[:, :nb * cells].float()
+    planes = planes.reshape(n, nb, side, side)
+    rest = tail.reshape(n, ch - nb, side, side).float() / 255.0
     return torch.cat([planes, rest], dim=1)
 
 
@@ -252,7 +266,7 @@ class TeamSlots:
 
     Slots are handed out in the order teams are first seen and stored in the
     checkpoint, so a critic keeps meaning what it meant. An id past the table's
-    size falls back to unknown rather than colliding with another team.
+    size is an error: registering a team must never silently fall back to unknown.
     """
 
     def __init__(self, mapping: dict | None = None, n_slots: int = N_TEAM_SLOTS):
@@ -269,7 +283,9 @@ class TeamSlots:
             return TEAM_UNKNOWN
         nxt = TEAM_UNKNOWN + 1 + len(self.map)
         if nxt >= self.n_slots:
-            return TEAM_UNKNOWN
+            # was a silent fall back to unknown, which is how the learner and every
+            # league agent all ended up in slot 0 (2026-09-28)
+            raise RuntimeError(f"team table full ({self.n_slots} slots): no slot for team {tid}")
         self.map[tid] = nxt
         return nxt
 

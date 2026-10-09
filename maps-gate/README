@@ -1,0 +1,6 @@
+Gate maps (2026-09-29, user: "gate on the actual training/test split"): the 14 official maps the gate can
+run (big_empty, default_small, stronghold stay excluded) + maps-test/ = 26 held-out loong maps (seeds
+9001/9002, never in maps-loong; chosen to match the training pool's size distribution). 26/40 = 65%
+generated, like training's --gen-share. Symlinks.
+2026-09-29 21:55 (user: "we cannot have 90 minute gates"): cut to a FIXED random subset (random.Random(20260929)):
+4 of the 14 official + 7 of the 26 held-out maps = 11 (64% generated). All 26 held-out maps stay in maps-test/.

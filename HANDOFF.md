@@ -261,11 +261,11 @@ and messages carry no sender, so a targeting bug and a classification bug are
 indistinguishable. **Read the debug artefact a black box ships before theorising
 about the black box.**
 
-The rule we had wrong: **a ray whose first step enters the segment immediately
-behind the head is dragged the length of the body and leaves from the TAIL, along
-the last body link** — so a curled dragon can cast west and have the ray leave
-south. Entering a deeper own segment is an ordinary self-hit. `tests/sonar_truth.py`
-predicts every ray independently of our simulator: **176,704 rays, 100.00%, all
+The rule we had wrong: **a ray cast opposite to the dragon's facing is dragged the
+length of the body and leaves from the TAIL, along the last body link** — so a curled
+dragon can cast west and have the ray leave south (refined 2026-10-01 from "first step
+enters the neck", see SONAR.md). Entering an own segment otherwise is an ordinary
+self-hit. `tests/sonar_truth.py` (since deleted) predicted every ray independently: **176,704 rays, 100.00%, all
 ten maps.** Three protocol rules also had to be fixed: the protocol is per dragon
 (not per team), a split child inherits its parent's (so it must be applied before
 the action), and a payload wider than 32 bits is dropped for a legacy receiver.

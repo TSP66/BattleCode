@@ -6,7 +6,7 @@ from .env import (BattlecodeVecEnv, Closures, EpisodeStats, Observation,
                   SONAR_DIRS, NUM_MSGS_CAP,
                   PRIV_COUNT, PRIV_BASE, N_PHI_TERMS, PHI_COMPS,
                   load_maps, reward_vector, BOTS, EP_COLS, WIDE_CH, WIDE_SIDE,
-                  BOARD_CH, BOARD_MAX)
+                  BOARD_CH, BOARD_MAX, GRID_CH, GRID_SIDE, PORTAL_BUILD, cview_layout)
 
 __all__ = ["BattlecodeVecEnv", "Closures", "EpisodeStats", "Observation",
            "CHANNELS", "SCALARS", "REWARD_COMPS", "DEFAULT_REWARD_WEIGHTS",
@@ -14,4 +14,4 @@ __all__ = ["BattlecodeVecEnv", "Closures", "EpisodeStats", "Observation",
            "SONAR_DIRS", "NUM_MSGS_CAP",
            "PRIV_COUNT", "PRIV_BASE", "N_PHI_TERMS", "PHI_COMPS",
            "load_maps", "reward_vector", "BOTS", "EP_COLS", "WIDE_CH", "WIDE_SIDE",
-           "BOARD_CH", "BOARD_MAX"]
+           "BOARD_CH", "BOARD_MAX", "GRID_CH", "GRID_SIDE", "PORTAL_BUILD", "cview_layout"]

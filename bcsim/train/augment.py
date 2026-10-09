@@ -8,6 +8,8 @@ a base map by some of:
     across the insertion point is carried through it);
   * kelp noise: open some kelp edges and add kelp to some open ones;
   * pearl noise: rescale the spawn gaps and switch a few spawn tiles on or off;
+  * pearl hotspots: richer and poorer regions, in symmetric pairs (OFFICIAL_AUG only
+    reweights tiles that already spawn; GENERATED_AUG may also move them);
   * start noise: slide each starting dragon a few tiles.
 
 Every change is applied to a whole symmetry orbit, so a variant keeps its base
@@ -38,6 +40,9 @@ SYM_NONE, SYM_FLIP_Y, SYM_FLIP_X, SYM_ROT180 = 0, 1, 2, 3
 SYM_WORD = {"x": SYM_FLIP_Y, "y": SYM_FLIP_X, "xy": SYM_ROT180}
 WORD_SYM = {v: k for k, v in SYM_WORD.items()}
 DIRS = {"N": (0, -1), "E": (1, 0), "S": (0, 1), "W": (-1, 0)}
+# official maps are always >10 in each dimension (the user's rule, 2026-09-23); a crop
+# must not take arena's 11x11 below it (it could reach 8 before 2026-09-28)
+MIN_SIDE = 11
 
 
 @dataclasses.dataclass
@@ -236,8 +241,8 @@ def render(m: Map) -> str:
 
 
 # ------------------------------------------------------------------ checks
-def valid(m: Map, min_reach: float = 0.35) -> bool:
-    if not (8 <= m.w <= 64 and 8 <= m.h <= 64):
+def valid(m: Map, min_reach: float = 0.35, every_dragon: bool = False) -> bool:
+    if not (MIN_SIDE <= m.w <= 64 and MIN_SIDE <= m.h <= 64):
         return False
     # portals come in pairs
     for ks, ps in ((m.hk, m.hp), (m.vk, m.vp)):
@@ -257,9 +262,12 @@ def valid(m: Map, min_reach: float = 0.35) -> bool:
                 return False
     # each team has a dragon that can move (help.map boxes some in on purpose),
     # and the teams can meet
+    moves = [any((c := m.step(b[0][0], b[0][1], d)) is not None and c not in occ
+                 for d in "NESW") for _, b in m.dragons]
+    if every_dragon and not all(moves):
+        return False
     for team in (0, 1):
-        if not any(any((c := m.step(b[0][0], b[0][1], d)) is not None and c not in occ
-                       for d in "NESW") for t, b in m.dragons if t == team):
+        if not any(mv for mv, (t, _) in zip(moves, m.dragons) if t == team):
             return False
     start = [body[0] for t, body in m.dragons if t == 0]
     goal = {body[0] for t, body in m.dragons if t == 1}
@@ -403,7 +411,7 @@ def structural(m: Map, rng, n_ops: int) -> Map:
         if rows is None or cols is None:
             continue
         n = remap(m, rows, cols)
-        if n is None or not (8 <= n.w <= 64 and 8 <= n.h <= 64):
+        if n is None or not (MIN_SIDE <= n.w <= 64 and MIN_SIDE <= n.h <= 64):
             continue
         m = n
         busy_r = {y for _, b in m.dragons for _, y in b}
@@ -459,6 +467,69 @@ def pearl_noise(m: Map, rng, scale_range: tuple[float, float], p_flip: float) ->
             m.max_gap[y, x] = m.max_gap[my, mx] = mxg
 
 
+def hotspot_field(m: Map, rng, n_range: tuple[int, int], centres_from: np.ndarray) -> np.ndarray:
+    """(h, w) field in [0, 1]: Gaussian bumps at a few centres and their mirror images,
+    torus distance. `centres_from` is an (h, w) mask of tiles a centre may sit on."""
+    ys, xs = np.nonzero(centres_from)
+    if not len(xs):
+        ys, xs = np.nonzero(np.ones((m.h, m.w), bool))
+    yy, xx = np.mgrid[0:m.h, 0:m.w]
+    field = np.zeros((m.h, m.w))
+    for _ in range(int(rng.integers(n_range[0], n_range[1] + 1))):
+        i = int(rng.integers(len(xs)))
+        r = rng.uniform(1.5, max(2.5, min(m.w, m.h) / 4))
+        for cx, cy in {(int(xs[i]), int(ys[i])), m.mirror_tile(int(xs[i]), int(ys[i]))}:
+            dx = np.abs(xx - cx)
+            dy = np.abs(yy - cy)
+            d2 = np.minimum(dx, m.w - dx) ** 2 + np.minimum(dy, m.h - dy) ** 2
+            field = np.maximum(field, np.exp(-d2 / (2 * r * r)))
+    return field
+
+
+def pearl_hotspots(m: Map, rng, strength: tuple[float, float], n_range: tuple[int, int],
+                   keep_support: bool, p_on: float = 0.0, p_off: float = 0.0) -> None:
+    """Pearls richer in a few symmetric regions and poorer elsewhere.
+
+    Each spawn tile's gaps are divided by A ** (f - mean f), f the hotspot field and A
+    the hot/cold rate ratio, so the map's average log spawn rate stays put and only
+    its geography changes. keep_support=True (official maps) never adds or removes a
+    spawn tile -- on portals the pearls stay inside their boxes. Otherwise a cold
+    spawn tile switches off with chance p_off * (1 - f) and a hot bare tile starts
+    spawning, at the map's typical gaps, with chance p_on * f.
+
+    A timed tile -- a narrow range late in the game, like autarky's 480-490 fields --
+    is an event rather than a rate, and is left exactly as it is."""
+    spawn = m.max_gap > 0
+    field = hotspot_field(m, rng, n_range, spawn if keep_support and spawn.any() else
+                          np.ones_like(spawn))
+    if spawn.any():
+        typical = (int(np.median(m.min_gap[spawn])), int(np.median(m.max_gap[spawn])))
+        mean_f = float(field[spawn].mean())
+    else:
+        typical, mean_f = (20, 60), float(field.mean())
+    a = math.exp(rng.uniform(math.log(strength[0]), math.log(strength[1])))
+    for y in range(m.h):
+        for x in range(m.w):
+            mx, my = m.mirror_tile(x, y)
+            if (my, mx) < (y, x):
+                continue              # the orbit's first member decides for both
+            f = float(field[y, x])
+            mn, mxg = int(m.min_gap[y, x]), int(m.max_gap[y, x])
+            if mn >= 100 and mxg - mn <= 0.25 * mxg:
+                continue              # timed tile
+            if not keep_support:
+                if mxg > 0 and rng.random() < p_off * (1 - f):
+                    mn, mxg = 0, 0
+                elif mxg == 0 and rng.random() < p_on * f:
+                    mn, mxg = typical
+            if mxg > 0:
+                g = a ** (f - mean_f)
+                mn = max(1, int(round(mn / g)))
+                mxg = max(mn, int(round(mxg / g)))
+            m.min_gap[y, x] = m.min_gap[my, mx] = mn
+            m.max_gap[y, x] = m.max_gap[my, mx] = mxg
+
+
 def start_noise(m: Map, rng, max_shift: int) -> None:
     """Slides each team-A dragon, and its mirror image, by a small offset."""
     if m.aug_sym == SYM_NONE or max_shift <= 0:
@@ -501,6 +572,24 @@ class AugConfig:
     pearl_flip: float = 0.05
     p_start: float = 0.7
     start_shift: int = 3
+    # pearl hotspots (pearl_hotspots); 0 = off, as before 2026-09-28
+    p_hot: float = 0.0
+    hot_strength: tuple = (1.5, 3.0)     # hot/cold spawn-rate ratio, log-uniform
+    hot_n: tuple = (1, 4)                # hotspots (each with its mirror image)
+    hot_keep_support: bool = True
+    hot_p_on: float = 0.0
+    hot_p_off: float = 0.0
+    every_dragon_moves: bool = False     # else one per team is enough (help.map)
+
+
+# Official maps: hotspots only reweight the tiles that already spawn, and no tile is
+# switched on or off (pearl_flip would put pearls outside portals' boxes).
+OFFICIAL_AUG = AugConfig(pearl_flip=0.0, p_hot=0.6)
+# Generated maps are already new layouts: no crop/pad, lighter kelp and start noise,
+# and hotspots that may also move where pearls can spawn.
+GENERATED_AUG = AugConfig(p_struct=0.0, p_kelp=0.3, pearl_flip=0.0, p_start=0.3,
+                          p_hot=0.8, hot_strength=(1.5, 4.0), hot_keep_support=False,
+                          hot_p_on=0.5, hot_p_off=0.3, every_dragon_moves=True)
 
 
 def augment(base: Map, rng, cfg: AugConfig = AugConfig(), tries: int = 30) -> Map | None:
@@ -512,9 +601,12 @@ def augment(base: Map, rng, cfg: AugConfig = AugConfig(), tries: int = 30) -> Ma
             kelp_noise(m, rng, cfg.kelp_add * rng.random() * 2, cfg.kelp_del * rng.random() * 2)
         if rng.random() < cfg.p_pearl:
             pearl_noise(m, rng, cfg.pearl_scale, cfg.pearl_flip)
+        if rng.random() < cfg.p_hot:
+            pearl_hotspots(m, rng, cfg.hot_strength, cfg.hot_n, cfg.hot_keep_support,
+                           cfg.hot_p_on, cfg.hot_p_off)
         if rng.random() < cfg.p_start:
             start_noise(m, rng, cfg.start_shift)
-        if valid(m):
+        if valid(m, every_dragon=cfg.every_dragon_moves):
             return m
     return None
 
@@ -554,6 +646,35 @@ def build_pool(map_dir: str, per_map: int, seed: int, alpha: float,
             names.append(f.stem)
             areas.append(base.w * base.h)
     return texts, np.array(weights), names, np.array(areas, dtype=np.float64)
+
+
+def training_pool(maps: str, per_map: int, seed: int, original_share: float,
+                  live_maps: str = "", live_share: float = 0.0, gen_maps: str = "",
+                  gen_share: float = 0.65, gen_per_map: int = 3, hotspots: bool = False,
+                  log=print):
+    """The ratchet trainers' map pool: (texts, weights, base names).
+
+    `maps` (the official maps) are augmented with OFFICIAL_AUG when `hotspots`, else
+    as before. With `live_share`, the live maps take that share of the official part.
+    With `gen_maps` (train/loong_mapgen.py), each generated map gets `gen_per_map`
+    GENERATED_AUG variants and the generated maps together take `gen_share` of all
+    sampling (the user's split, 2026-09-28: 35% official, 65% generated)."""
+    cfg = OFFICIAL_AUG if hotspots else AugConfig()
+    texts, w, names, _ = build_pool(maps, per_map, seed, 0.0, original_share, cfg)
+    if live_maps and live_share > 0:
+        live = {f.stem for f in pathlib.Path(live_maps).glob("*.map")}
+        w = set_group_share(w, names, live, live_share)
+    w = w / w.sum()
+    if not gen_maps:
+        return texts, w, names
+    gt, gw, gn, _ = build_pool(gen_maps, gen_per_map, seed + 1, 0.0, original_share,
+                               GENERATED_AUG)
+    gn = [f"gen:{n}" for n in gn]
+    all_w = np.concatenate([w * (1 - gen_share), gw / gw.sum() * gen_share])
+    log(f"map pool: {len(set(names))} official maps, {len(texts)} with variants, at "
+        f"{1 - gen_share:.0%}; {len(set(gn))} generated, {len(gt)} with variants, at "
+        f"{gen_share:.0%}; pearl hotspots on official maps {'on' if hotspots else 'off'}")
+    return texts + gt, all_w, names + gn
 
 
 def reweight(weights: np.ndarray, areas: np.ndarray, alpha_from: float,

@@ -32,7 +32,7 @@ import bcsim                                    # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 COMP = {n: i for i, n in enumerate(bcsim.REWARD_COMPS)}
-V8 = ["v8_win", "v8_len", "v8_top3", "v8_kill", "v8_exp"]
+V8 = ["v8_win", "v8_len", "v8_queen", "v8_kill", "v8_exp"]
 OLD = [c for c in bcsim.REWARD_COMPS if c not in V8 and c != "outcome"]
 
 

@@ -1,4 +1,4 @@
-# Sonar under unswbc 1.0.0 — SOLVED, and byte-identical
+# Sonar — SOLVED, and byte-identical (unswbc 1.2.3)
 
 **Status (2026-09-24): our simulator matches the reference engine exactly.**
 `tests/parity_sonar.py` drives the engine and our text simulator in lockstep and
@@ -7,7 +7,13 @@ ten official maps: **0 blocks differing out of 423,669 turns, carrying 1,159,721
 messages.** The legacy path is unchanged and still exact.
 
     python bcsim/tests/parity_sonar.py       # lockstep block parity, 3 regimes
-    python bcsim/tests/sonar_truth.py        # per-ray truth from the engine's replay
+    python bcsim/tests/stress.py 300         # every rule, random maps and policies
+
+**2026-10-01:** the drag rule below was refined against unswbc 1.2.3 (stress game gen866):
+the trigger is the CAST DIRECTION being opposite the dragon's facing, not the first
+step entering the neck. They differ only where a portal put the neck elsewhere. The
+one-off probes that derived these rules (probe_sonar*.py, sonar_truth.py) were deleted
+then; they targeted 1.0.0 and encoded the old trigger.
 
 ## What unlocked it: the engine's replay is the source of truth
 
@@ -37,9 +43,10 @@ that a 20-minute look at the `.vsix` would have prevented.
 
 ## The rule we had wrong: a ray is dragged along its own body
 
-    If the first step enters the segment IMMEDIATELY BEHIND THE HEAD, the ray is
-    dragged the whole length of the body and re-emerges FROM THE TAIL, travelling
-    along the last body link — not in the direction it was cast.
+    A ray cast OPPOSITE TO THE DRAGON'S FACING is dragged the whole length of the
+    body and re-emerges FROM THE TAIL, travelling along the last body link — not in
+    the direction it was cast. (Until 2026-10-01: "if the first step enters the
+    segment behind the head", which is the same thing except next to a portal.)
 
 So a dragon curled into an L can cast **west** and have the ray leave going
 **south**. Entering any *deeper* own segment is an ordinary hit on yourself,
@@ -49,10 +56,10 @@ The old model cast a straight line and treated the whole body as transparent.
 That agrees only when the body happens to lie straight behind the head, which is
 why it looked nearly right: 97.2% per-ray on an empty torus, and 54.9% on `help`.
 
-`tests/sonar_truth.py` reconstructs the board from the replay, predicts each ray
-independently of our simulator, and compares: **176,704 rays, 100.00%, all ten
-official maps, 0 state-rebuild mismatches.** It is a standing test, so the rule
-cannot quietly rot.
+`tests/sonar_truth.py` (deleted 2026-10-01) reconstructed the board from the replay, predicted each ray
+independently of our simulator, and compared: **176,704 rays, 100.00%, all ten
+official maps, 0 state-rebuild mismatches.** The standing guard is now parity_sonar.py
+and stress.py, which compare whole blocks against the engine.
 
 Worth noting how the rule was pinned: dragon 1, body `[(15,11),(14,11),(14,12)]`,
 cast **W**, and the engine logged the ray leaving **S** from `(14,12)`. Its four

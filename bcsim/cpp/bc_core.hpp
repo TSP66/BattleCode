@@ -29,36 +29,45 @@ constexpr int MAX_UNITS_HARD = 4096;   // safety cap, real limit comes from the 
 constexpr int VISION = 3;              // 7x7 window
 constexpr int WINDOW = 2 * VISION + 1;
 
-// ---------------------------------------------------------------- mt19937
-// std::mt19937 as libc++ implements it; the engine seeds it with 1592614637.
-struct MT19937 {
-    static constexpr uint32_t DEFAULT_SEED = 1592614637u;
-    uint32_t mt[624];
-    int idx = 625;
+// ---------------------------------------------------------------- mt19937_64
+// std::mt19937_64. Since unswbc 1.1.0 the engine seeds its pearls with the match's
+// 64-bit seed (the "seed" of /battles/:id) through this generator and draws
+// rng() % (max - min + 1) + min -- verified 2026-09-28 against five server games.
+struct MT19937_64 {
+    uint64_t mt[312];
+    int idx = 313;
 
-    void seed(uint32_t s) {
+    void seed(uint64_t s) {
         mt[0] = s;
-        for (uint32_t i = 1; i < 624; i++)
-            mt[i] = 1812433253u * (mt[i - 1] ^ (mt[i - 1] >> 30)) + i;
-        idx = 624;
+        for (uint64_t i = 1; i < 312; i++)
+            mt[i] = 6364136223846793005ull * (mt[i - 1] ^ (mt[i - 1] >> 62)) + i;
+        idx = 312;
     }
     void generate() {
-        for (int i = 0; i < 624; i++) {
-            uint32_t y = (mt[i] & 0x80000000u) + (mt[(i + 1) % 624] & 0x7fffffffu);
-            mt[i] = mt[(i + 397) % 624] ^ (y >> 1);
-            if (y & 1) mt[i] ^= 2567483615u;
+        for (int i = 0; i < 312; i++) {
+            uint64_t y = (mt[i] & 0xFFFFFFFF80000000ull) | (mt[(i + 1) % 312] & 0x7FFFFFFFull);
+            mt[i] = mt[(i + 156) % 312] ^ (y >> 1);
+            if (y & 1) mt[i] ^= 0xB5026F5AA96619E9ull;
         }
         idx = 0;
     }
-    uint32_t next() {
-        if (idx >= 624) generate();
-        uint32_t y = mt[idx++];
-        y ^= y >> 11;
-        y ^= (y << 7) & 2636928640u;
-        y ^= (y << 15) & 4022730752u;
-        y ^= y >> 18;
-        return y;
+    uint64_t next() {
+        if (idx >= 312) generate();
+        uint64_t x = mt[idx++];
+        x ^= (x >> 29) & 0x5555555555555555ull;
+        x ^= (x << 17) & 0x71D67FFFEDA60000ull;
+        x ^= (x << 37) & 0xFFF7EEE000000000ull;
+        x ^= x >> 43;
+        return x;
     }
+};
+
+// The pearl generator: the match's 64-bit seed through std::mt19937_64, as the engine
+// has done since unswbc 1.1.0 (`unswbc run` draws a random seed unless given --seed).
+struct PearlRng {
+    MT19937_64 r64;
+    void seed(uint64_t s) { r64.seed(s); }
+    uint32_t draw(uint32_t range) { return (uint32_t)(r64.next() % (uint64_t)range); }
 };
 
 // ---------------------------------------------------------------- map data
@@ -197,6 +206,9 @@ struct Dragon {
     // inherits its parent's protocol, so it is not legacy at birth. A dragon
     // that spawns with the map does start legacy, until its own first reply.
     uint8_t protocol = 2;
+    // The round this dragon split off its parent; 0 for one that spawned with the map
+    // (grid_cfg BIRTH, 2026-10-03).
+    int birth = 0;
 
     void reserve_ring(int want) {
         int cap = 8;
@@ -234,13 +246,13 @@ enum Stat {
     ST_STEP = 0, ST_PORTAL_STEP, ST_SPRINT_STEP, ST_PEARL_EATEN, ST_PEARL_SPAWN,
     ST_DEATH_WALL, ST_DEATH_SELF, ST_DEATH_OTHER, ST_DEATH_HEAD, ST_DEATH_ACTION,
     ST_SPLIT_OK, ST_SPLIT_ILLEGAL, ST_SPLIT_LIMIT, ST_SONAR_CAST, ST_SONAR_HIT,
-    ST_SONAR_SELF, ST_SONAR_LOST, ST_BLOCKED_SPAWN, ST_COUNT
+    ST_SONAR_SELF, ST_SONAR_LOST, ST_BLOCKED_SPAWN, ST_FREE_SPRINT_STEP, ST_COUNT
 };
 
 // --------------------------------------------------------------- game
 struct Game {
     const MapData* map = nullptr;
-    MT19937 rng;
+    PearlRng rng;
 
     std::vector<uint8_t> pearl;    // per tile, 0/1
     std::vector<int32_t> cd;       // per tile countdown, -1 = never
@@ -261,9 +273,10 @@ struct Game {
     int64_t stats[ST_COUNT] = {0};
     bool record_events = true;
 
-    void reset(const MapData& m, uint32_t seed) {
-        map = &m;
+    // `seed` is the match seed (the "seed" of /battles/:id); see PearlRng
+    void reset(const MapData& m, uint64_t seed) {
         rng.seed(seed);
+        map = &m;
         const int n = m.area();
         pearl.assign(n, 0);
         cd.assign(n, -1);
@@ -281,38 +294,55 @@ struct Game {
         death_log.clear();
         for (int i = 0; i < ST_COUNT; i++) stats[i] = 0;
 
-        for (const DragonSpawn& s : m.dragons) {
-            Dragon d;
-            d.id = (int)dragons.size();
-            d.team = (uint8_t)s.team;
-            d.reserve_ring((int)s.body.size());
-            for (size_t i = 0; i < s.body.size(); i++) {
-                d.ring[i] = s.body[i];
-                d.len++;
-            }
-            d.start = 0;
-            // The head's facing comes from the step that leads into it.
-            if (d.len >= 2) {
-                int hx = s.body[0] % m.w, hy = s.body[0] / m.w;
-                int nx = s.body[1] % m.w, ny = s.body[1] / m.w;
-                char back = direction_between(m, hx, hy, nx, ny);
-                d.facing = opposite(back);
-            }
-            dragons.push_back(std::move(d));
-            Dragon& nd = dragons.back();
-            alive[nd.team]++;
-            for (int i = 0; i < nd.len; i++) {
-                owner[nd.seg(i)] = (int16_t)(dragons.size() - 1);
-                head_at[nd.seg(i)] = (i == 0);
-                char face = nd.facing;
-                if (i > 0) {
-                    const int16_t a = nd.seg(i), b = nd.seg(i - 1);
-                    face = direction_between(m, a % m.w, a / m.w, b % m.w, b / m.w);
-                }
-                seg_dir[nd.seg(i)] = dir_code(face);
-            }
-        }
+        for (const DragonSpawn& s : m.dragons) add_spawn(s);
         init_pearl_countdowns();
+    }
+
+    // One spawned dragon, as the map's DRAGON line places it (reset; VecEnv::set_scenario).
+    void add_spawn(const DragonSpawn& s, char facing = 'N') {
+        const MapData& m = *map;
+        Dragon d;
+        d.id = (int)dragons.size();
+        d.team = (uint8_t)s.team;
+        d.facing = facing;
+        d.reserve_ring((int)s.body.size());
+        for (size_t i = 0; i < s.body.size(); i++) {
+            d.ring[i] = s.body[i];
+            d.len++;
+        }
+        d.start = 0;
+        // The head's facing is the step from the neck into it -- not the reverse of
+        // the step from the head to the neck, which differs where a portal links
+        // the two tiles (stress gen220, loong_00_0234).
+        if (d.len >= 2)
+            d.facing = direction_between(m, s.body[1] % m.w, s.body[1] / m.w,
+                                         s.body[0] % m.w, s.body[0] / m.w);
+        dragons.push_back(std::move(d));
+        Dragon& nd = dragons.back();
+        alive[nd.team]++;
+        for (int i = 0; i < nd.len; i++) {
+            owner[nd.seg(i)] = (int16_t)(dragons.size() - 1);
+            head_at[nd.seg(i)] = (i == 0);
+            char face = nd.facing;
+            if (i > 0) {
+                const int16_t a = nd.seg(i), b = nd.seg(i - 1);
+                face = direction_between(m, a % m.w, a / m.w, b % m.w, b / m.w);
+            }
+            seg_dir[nd.seg(i)] = dir_code(face);
+        }
+    }
+
+    // A dragon that is already dead (a synthetic position's lost queen): it holds its id.
+    void add_dead(int team) {
+        Dragon d;
+        d.id = (int)dragons.size();
+        d.team = (uint8_t)team;
+        d.reserve_ring(1);
+        d.ring[0] = 0;
+        d.len = 0;
+        d.alive = 0;
+        d.death = DEATH_ACTION;
+        dragons.push_back(std::move(d));
     }
 
     static uint8_t dir_code(char d) {
@@ -338,7 +368,7 @@ struct Game {
                 if (m.idx(mx, my) < m.idx(x, y)) continue;
                 const int t = m.idx(x, y);
                 if (!m.spawns[t]) continue;
-                int32_t v = (int32_t)(rng.next() % (uint32_t)(m.max_gap[t] - m.min_gap[t] + 1))
+                int32_t v = (int32_t)(rng.draw((uint32_t)(m.max_gap[t] - m.min_gap[t] + 1)))
                             + m.min_gap[t];
                 cd[t] = v;
                 cd[m.idx(mx, my)] = v;
@@ -364,7 +394,7 @@ struct Game {
                     if (!pearl[tm] && owner[tm] < 0) { pearl[tm] = 1; stats[ST_PEARL_SPAWN]++; }
                     else stats[ST_BLOCKED_SPAWN]++;
                 }
-                int32_t v = (int32_t)(rng.next() % (uint32_t)(m.max_gap[t] - m.min_gap[t] + 1))
+                int32_t v = (int32_t)(rng.draw((uint32_t)(m.max_gap[t] - m.min_gap[t] + 1)))
                             + m.min_gap[t];
                 cd[t] = v;
                 cd[tm] = v;
@@ -401,9 +431,9 @@ struct Game {
     }
 
     // ---- movement
-    // One step. `extra` is true for every step after the first in a sprint,
+    // One step. `paid` is true for every step after the free ones (see move()),
     // which costs one more tail segment. Returns false once the dragon died.
-    bool step(int di, char dir, bool extra) {
+    bool step(int di, char dir, bool paid) {
         Dragon& d = dragons[di];
         const MapData& m = *map;
         d.facing = dir;
@@ -453,7 +483,7 @@ struct Game {
         } else {
             drop_tail(d);
         }
-        if (extra) { drop_tail(d); stats[ST_SPRINT_STEP]++; }
+        if (paid) { drop_tail(d); stats[ST_SPRINT_STEP]++; }
         stats[ST_STEP]++;
         if (ate) stats[ST_PEARL_EATEN]++;
         if (record_events) events.push_back({EV_STEP, d.id, dest, ate, 0});
@@ -470,15 +500,20 @@ struct Game {
     }
 
     // MOVE with one or more steps. An empty list is not an action at all.
+    // The first free_steps(L) steps are free, L the length when the move starts
+    // (unswbc 1.2.3); each later step costs a segment, and a dragon of length 2
+    // cannot pay and dies.
+    static int free_steps(int len) { return (len + 3) / 4; }
     void move(int di, const char* dirs, int n) {
-        if (n <= 0) return;
-        if (!step(di, dirs[0], false)) return;
-        for (int i = 1; i < n; i++) {
-            if (dragons[di].len <= 2) {   // cannot pay for another step
+        const int free = free_steps(dragons[di].len);
+        for (int i = 0; i < n; i++) {
+            const bool paid = i >= free;
+            if (paid && dragons[di].len <= 2) {
                 kill(di, DEATH_ACTION);
                 return;
             }
-            if (!step(di, dirs[i], true)) return;
+            if (i > 0 && !paid) stats[ST_FREE_SPRINT_STEP]++;
+            if (!step(di, dirs[i], paid)) return;
         }
     }
 
@@ -501,6 +536,7 @@ struct Game {
         // received 64-bit payloads and carried an all-zero ECHOES line on its
         // very first turn, neither of which a legacy dragon gets.
         child.protocol = parent.protocol;
+        child.birth = round;
         child.reserve_ring(k);
         for (int i = 0; i < k; i++) child.ring[i] = parent.seg(len - 1 - i);
         child.start = 0;
@@ -559,40 +595,36 @@ struct Game {
     // straight off the engine's own replay (tests/sonar_truth.py, 176,704 rays
     // on all ten official maps, 100% agreement):
     //
-    //   If the first step enters the segment IMMEDIATELY BEHIND THE HEAD, the ray
-    //   is dragged the whole length of the body and re-emerges from the TAIL,
-    //   travelling along the last body link -- not in the direction it was cast.
+    //   A ray cast OPPOSITE TO THE DRAGON'S FACING is dragged the whole length of
+    //   the body and re-emerges from the TAIL, travelling along the last body
+    //   link -- not in the direction it was cast.
     //
     // So a dragon curled into an L can cast west and have the ray leave going
-    // south. Entering any *deeper* own segment is an ordinary hit on yourself,
-    // which is how a curled dragon comes to hear its own sonar. The old model
-    // cast a straight line and treated the whole body as transparent, which
-    // agreed only when the body happened to lie straight behind the head; that
-    // is what put per-ray parity at 97.2% on an empty torus and 54.9% on `help`.
+    // south. Any other ray leaves the head, and entering an own segment is an
+    // ordinary hit on yourself, which is how a curled dragon comes to hear its
+    // own sonar. The test is the cast direction against the facing, not "the
+    // first step enters the neck": the two differ only where a portal put the
+    // neck elsewhere (stress gen866: a dragon that came north through a portal
+    // casts north into its own neck and hears itself; the engine docs, Execution
+    // Order, state the facing rule).
     //
     // Whoever the ray stops on receives the message -- ally, enemy or the sender
     // itself. There is no privacy here.
-    void cast_sonar(int di, char facing, uint64_t value) {
+    void cast_sonar(int di, char cast, uint64_t value) {
         const MapData& m = *map;
         Dragon& d = dragons[di];
         const int limit = m.w + m.h;
         stats[ST_SONAR_CAST]++;
         int x = d.head() % m.w, y = d.head() / m.w;
-        char dir = facing;
+        char dir = cast;
 
-        int fx, fy;
-        if (!tile_after_step(m, x, y, dir, fx, fy)) {
-            stats[ST_SONAR_LOST]++;
-            d.echo[SE_KELP]++;
-            return;
-        }
         // Dragged along the body, leaving from the tail along the last link.
         // This does NOT depend on the declared protocol: the geometry of the ray
         // is the same either way, and gating it on protocol 3 made legacy
         // senders cast straight lines that the engine bends (caught by the
         // mixed-protocol pass of tests/parity_sonar.py). What the protocol
         // governs is only the ECHOES line and whether a wide payload can land.
-        if (d.len >= 2 && m.idx(fx, fy) == d.seg(1)) {
+        if (d.len >= 2 && dir == opposite(d.facing)) {
             const int16_t tail = d.seg(d.len - 1), prev = d.seg(d.len - 2);
             const char nd = direction_between(m, prev % m.w, prev / m.w,
                                               tail % m.w, tail / m.w);
@@ -645,14 +677,18 @@ struct Game {
 
 
 
-    // ---- outcome, exactly ResultAfterRound
+    // ---- outcome, exactly ResultAfterRound. After the last round (unswbc 1.2.3):
+    // the longer queen (dragon id 0 or 1, one a team; dead = 0), then the longest
+    // living dragon, then the total length.
+    static bool is_queen(const Dragon& d) { return d.id < 2; }
     void settle(bool force_end) {
-        int count[2] = {0, 0}, longest[2] = {0, 0}, total[2] = {0, 0};
+        int count[2] = {0, 0}, longest[2] = {0, 0}, total[2] = {0, 0}, queen[2] = {0, 0};
         for (const Dragon& d : dragons) {
             if (!d.alive) continue;
             count[d.team]++;
             total[d.team] += d.len;
             longest[d.team] = std::max(longest[d.team], d.len);
+            if (is_queen(d)) queen[d.team] = d.len;
         }
         if (count[0] == 0 || count[1] == 0) {
             finished = true;
@@ -663,7 +699,8 @@ struct Game {
         if (!force_end && round < 499) return;
         finished = true;
         end_reason = 1;
-        if (longest[0] != longest[1]) winner = longest[0] > longest[1] ? 0 : 1;
+        if (queen[0] != queen[1]) winner = queen[0] > queen[1] ? 0 : 1;
+        else if (longest[0] != longest[1]) winner = longest[0] > longest[1] ? 0 : 1;
         else if (total[0] != total[1]) winner = total[0] > total[1] ? 0 : 1;
         else winner = -1;
     }

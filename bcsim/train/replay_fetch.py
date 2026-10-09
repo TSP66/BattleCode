@@ -28,6 +28,7 @@ API = f"{SITE}/api/v1"
 # the API allows 120 requests a minute per key; stay under it
 API_GAP = 0.6
 _last_api = 0.0
+_api_lock = __import__("threading").Lock()   # api() may be called from several threads
 
 
 def api_key() -> str:
@@ -65,10 +66,14 @@ def _open(req: urllib.request.Request, opener=None):
 
 def api(path: str, key: str, opener=None):
     global _last_api
-    gap = API_GAP - (time.monotonic() - _last_api)
-    if gap > 0:
-        time.sleep(gap)
-    _last_api = time.monotonic()
+    # every caller takes the next free slot API_GAP after the last one, so any number of
+    # threads together stay under the limit while each waits out its ~3 s of latency
+    with _api_lock:
+        slot = max(time.monotonic(), _last_api + API_GAP)
+        _last_api = slot
+    wait = slot - time.monotonic()
+    if wait > 0:
+        time.sleep(wait)
     req = urllib.request.Request(f"{API}/{path}", headers={
         "Authorization": f"Bearer {key}", "User-Agent": "bc-replay-fetch"})
     return _open(req, opener)
@@ -100,20 +105,34 @@ def devalue(arr: list):
     return h(0)
 
 
-def list_series(team: str) -> list[dict]:
-    """Every battle (series) the team is in, from the site's filtered list."""
+def list_series(team: str, since: str | None = None) -> list[dict]:
+    """Every battle (series) the team is in, newest first, from the site's filtered list.
+
+    The list filters by team id (`teams=<id>`); a name is resolved through the
+    page's own team table. With `since` (an ISO time), stops at older battles."""
+    def page_data(q: dict) -> dict:
+        req = urllib.request.Request(f"{SITE}/battles/__data.json?{urllib.parse.urlencode(q)}",
+                                     headers={"User-Agent": "bc-replay-fetch"})
+        return devalue(json.load(_open(req))["nodes"][1]["data"])
+
+    tid = int(team) if team.isdigit() else None
+    if tid is None:
+        ids = [t["id"] for t in page_data({"page": 1})["teams"] if t["name"] == team]
+        if len(ids) != 1:
+            raise SystemExit(f"team {team!r}: {len(ids)} teams with that name")
+        tid = ids[0]
     out, page = [], 1
     while True:
-        q = urllib.parse.urlencode({"team": team, "page": page})
-        req = urllib.request.Request(f"{SITE}/battles/__data.json?{q}",
-                                     headers={"User-Agent": "bc-replay-fetch"})
-        data = json.load(_open(req))
-        d = devalue(data["nodes"][1]["data"])
-        out += d["battles"]
+        d = page_data({"teams": tid, "page": page})
+        assert d["filters"]["teams"] == [tid], d["filters"]   # an ignored filter lists every battle
+        for b in d["battles"]:
+            if since and b["at"] < since:
+                return out
+            out.append(b)
         if page * d["perPage"] >= d["total"] or not d["battles"]:
             return out
         page += 1
-        time.sleep(0.5)
+        time.sleep(0.2)
 
 
 def download_replay(game_id: int, key: str, dest: pathlib.Path) -> bool:
@@ -136,12 +155,19 @@ def main() -> None:
     p.add_argument("--out", required=True)
     p.add_argument("--latest-only", action="store_true",
                    help="only download games the team played with its newest submission")
+    p.add_argument("--max-games", type=int, default=0,
+                   help="download at most this many games, newest first (games already on disk count)")
+    p.add_argument("--since-hours", type=float,
+                   help="only battles from the last this many hours")
     a = p.parse_args()
     out = pathlib.Path(a.out)
     (out / "games").mkdir(parents=True, exist_ok=True)
     key = api_key()
 
-    series = list_series(a.team)
+    since = None
+    if a.since_hours:
+        since = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - 3600 * a.since_hours))
+    series = list_series(a.team, since)
     print(f"{a.team}: {len(series)} battles listed", flush=True)
 
     known: dict[int, dict] = {}
@@ -170,12 +196,19 @@ def main() -> None:
         return m["submissionAId"] if b["teamAName"] == a.team else m["submissionBId"]
 
     keep = dict(known)
+    if since:
+        listed = {s["id"] for s in series}
+        keep = {sid: b for sid, b in known.items() if sid in listed}
     if a.latest_only:
         newest = max(team_sub(b) for b in known.values())
         keep = {sid: b for sid, b in known.items() if team_sub(b) == newest}
         print(f"newest submission {newest}: {len(keep)} of {len(known)} battles", flush=True)
     todo = [(sid, g["id"]) for sid, b in sorted(keep.items()) for g in b["games"]
             if g["status"] == "completed" and not (out / "games" / f"{g['id']}.replay").exists()]
+    if a.max_games:
+        have = sum(1 for sid, b in keep.items() for g in b["games"]
+                   if (out / "games" / f"{g['id']}.replay").exists())
+        todo = sorted(todo, key=lambda t: -t[1])[:max(0, a.max_games - have)]
     print(f"{len(todo)} replays to download (~{len(todo) * 2 * API_GAP / 60:.0f} min)", flush=True)
     for i, (sid, gid) in enumerate(todo):
         meta = out / "games" / f"{gid}.json"

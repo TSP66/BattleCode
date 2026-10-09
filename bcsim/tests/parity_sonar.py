@@ -1,7 +1,6 @@
 """Our sonar against the engine's, turn by turn, block for block.
 
-probe_sonar.py established what the engine does. This checks that we do the
-same thing: the reference engine and our text simulator are driven in lockstep
+This checks that we do what the engine does: the reference engine and our text simulator are driven in lockstep
 with identical replies, and every round block is compared byte for byte. That
 covers NUM_MSGS and the 64-bit payloads, the ECHOES line and its five counts,
 and the fact that ECHOES only appears once a team has declared protocol 3.
@@ -15,15 +14,24 @@ that is only exercised on an empty board is not exercised at all.
 
 from __future__ import annotations
 
-import ctypes
 import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
+from diffsim import Sim                          # noqa: E402
 from oracle import OracleGame                   # noqa: E402
-from probe_sonar import parse, payload, safe_dirs, DIRS   # noqa: E402
+from blockparse import Block                     # noqa: E402
+
+
+DIRS = "NESW"
+
+
+def payload(did: int, d: int) -> int:
+    """A payload that uses the whole word: the top bit, the bottom bits, and the
+    sender and direction in the middle."""
+    return 1 << 63 | (did & 0xFFF) << 16 | (d & 0x3) << 8 | 0x5A
 
 
 def narrow(did: int, d: int) -> int:
@@ -31,44 +39,6 @@ def narrow(did: int, d: int) -> int:
     return ((did & 0xFFF) << 8 | (d & 0x3) << 4 | 0xA) & 0xFFFFFFFF
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-LIB = ctypes.CDLL(str(pathlib.Path(__file__).resolve().parents[1]
-                      / "bcsim" / "libbctext.so"))
-LIB.bct_create.restype = ctypes.c_void_p
-LIB.bct_create.argtypes = [ctypes.c_char_p, ctypes.c_uint, ctypes.c_char_p, ctypes.c_int]
-LIB.bct_destroy.argtypes = [ctypes.c_void_p]
-LIB.bct_next.argtypes = [ctypes.c_void_p]
-LIB.bct_dragon_id.argtypes = [ctypes.c_void_p, ctypes.c_int]
-LIB.bct_round_block.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
-LIB.bct_reply.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_char_p]
-
-
-class TextSim:
-    # The engine seeds its pearl countdowns with this fixed value, and a
-    # parity run has to match it or every countdown differs.
-    DEFAULT_SEED = 1592614637
-
-    def __init__(self, map_text: str, seed: int = DEFAULT_SEED):
-        err = ctypes.create_string_buffer(256)
-        self.h = LIB.bct_create(map_text.encode(), seed, err, len(err))
-        if not self.h:
-            raise SystemExit(f"bct_create: {err.value.decode()}")
-        self.buf = ctypes.create_string_buffer(1 << 16)
-
-    def next(self) -> int:
-        return LIB.bct_next(ctypes.c_void_p(self.h))
-
-    def dragon_id(self, di: int) -> int:
-        return LIB.bct_dragon_id(ctypes.c_void_p(self.h), di)
-
-    def block(self, di: int) -> str:
-        n = LIB.bct_round_block(ctypes.c_void_p(self.h), di, self.buf, len(self.buf))
-        return self.buf.raw[:n].decode()
-
-    def reply(self, di: int, text: str) -> None:
-        LIB.bct_reply(ctypes.c_void_p(self.h), di, text.encode())
-
-    def close(self) -> None:
-        LIB.bct_destroy(ctypes.c_void_p(self.h))
 
 
 def run(map_text: str, protocol) -> dict:
@@ -87,28 +57,28 @@ def run(map_text: str, protocol) -> dict:
     even-id parent speaks protocol 3 without ever declaring it. That is the
     engine's behaviour and it is what makes this case worth checking.
     """
-    sim = TextSim(map_text)
+    sim = Sim(map_text)
     st = {"turns": 0, "diff": 0, "first": None, "echo_turns": 0, "msg_turns": 0,
           "echo_nonzero": 0, "msgs": 0, "desync": 0}
 
     def policy(did: int, text: str) -> str:
-        b = parse(text)
+        b = Block(text)
         st["turns"] += 1
-        if b["echoes"] is not None:
+        if b.echoes is not None:
             st["echo_turns"] += 1
-            if any(b["echoes"]):
+            if any(b.echoes):
                 st["echo_nonzero"] += 1
-        if b["msgs"]:
+        if b.msgs:
             st["msg_turns"] += 1
-            st["msgs"] += len(b["msgs"])
+            st["msgs"] += len(b.msgs)
 
-        di = sim.next()
+        di = sim.next_turn()
         if di < 0 or sim.dragon_id(di) != did:
             st["desync"] += 1
         else:
-            ours = sim.block(di)
+            ours = sim.round_block(di)
             if ours != text and st["diff"] == 0:
-                st["first"] = (did, b["round"], ours, text)
+                st["first"] = (did, b.round, ours, text)
             st["diff"] += int(ours != text)
 
         # Half the rays carry a payload that fits 32 bits and half do not, so
@@ -118,11 +88,11 @@ def run(map_text: str, protocol) -> dict:
         # the ray itself was never compared at all.
         reply = [f"SONAR {d} {payload(did, k) if k % 2 else narrow(did, k)}"
                  for k, d in enumerate(DIRS)]
-        ok = safe_dirs(b)
-        if b["length"] >= 6 and (b["round"] % 7) == 0:
-            reply.append(f"SPLIT {b['length'] // 2}")
+        ok = b.safe_dirs()
+        if b.length >= 6 and (b.round % 7) == 0:
+            reply.append(f"SPLIT {b.length // 2}")
         else:
-            reply.append(f"MOVE {ok[0] if ok else b['dir']}")
+            reply.append(f"MOVE {ok[0] if ok else b.dir}")
         declare = (did % 2 == 0) if protocol == "mixed" else protocol >= 3
         if declare:
             reply.append("PROTOCOL 3")
@@ -137,7 +107,6 @@ def run(map_text: str, protocol) -> dict:
         g.run()
     except Exception as ex:
         st["error"] = f"{type(ex).__name__}: {ex}"
-    sim.close()
     return st
 
 

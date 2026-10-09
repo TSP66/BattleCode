@@ -1,0 +1,2 @@
+== export (ffl)
+904,352 int16 weights + 8,278 floats -> /home/thomaspetty/BattleCode/lstmbot/weights.hpp (scratch_1002/g013_s13_seg4_latest_1607.pt iter 199; temperature 0.1 folded)

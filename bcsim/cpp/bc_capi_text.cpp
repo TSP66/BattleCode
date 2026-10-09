@@ -28,7 +28,7 @@ int copy_out(const std::string& s, char* buf, int cap) {
 
 extern "C" {
 
-void* bct_create(const char* map_text, unsigned int seed, char* err, int errcap) {
+void* bct_create(const char* map_text, unsigned long long seed, char* err, int errcap) {
     auto* h = new TextHandle();
     std::string message;
     if (!load_map(map_text, h->map, message)) {
@@ -85,12 +85,13 @@ int bct_deaths(void* p, int* out, int cap) {
 void bct_result(void* p, int* out) {
     auto* h = (TextHandle*)p;
     const Game& g = h->drv.g;
-    int count[2] = {0, 0}, total[2] = {0, 0}, longest[2] = {0, 0};
+    int count[2] = {0, 0}, total[2] = {0, 0}, longest[2] = {0, 0}, queen[2] = {0, 0};
     for (const Dragon& d : g.dragons) {
         if (!d.alive) continue;
         count[d.team]++;
         total[d.team] += d.len;
         longest[d.team] = longest[d.team] > d.len ? longest[d.team] : d.len;
+        if (Game::is_queen(d)) queen[d.team] = d.len;
     }
     out[0] = g.round;
     out[1] = g.winner;
@@ -101,6 +102,8 @@ void bct_result(void* p, int* out) {
     out[6] = total[1];
     out[7] = longest[0];
     out[8] = longest[1];
+    out[9] = queen[0];
+    out[10] = queen[1];
 }
 
 }  // extern "C"

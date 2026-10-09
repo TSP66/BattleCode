@@ -19,3 +19,10 @@ We need to check that the action space includes splitting: parent->2 and child g
 We need to check we are using all the action space. No point predicting anything we don't use. 
 
 We need to allow stupid operations like suicide. As sometimes it is optimial
+
+We also need to review how portals and kelp are embedded - as they are on boundaries - whereas pearls and dragons on tiles themselves.
+
+For map augmentation we should also play around with pearl distribution - i.e., not randon pearl spots but genuine different density distributions. I.e., gaussian-esque shapes over different stops. Any distribution is valid as long as it is symmetrical between teams.
+
+Add lots and lots and lots of maps!
+

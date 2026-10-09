@@ -68,26 +68,85 @@ def encode(turn, facing: int, length: int) -> tuple[int, int]:
             f = d
         return (0, 3, 12)[n - 1] + code, -1
     if turn.kind == 1:
-        ids = [N_MOVES + i for i, k in enumerate(SPLIT_K)
-               if (k if k > 0 else length // 2) == turn.split_k]
+        ids = split_ids(turn.split_k, length)
         return (ids[0], ids[1] if len(ids) > 1 else -1) if ids else (-1, -1)
     return -1, -1
 
 
-def convert(game_json: pathlib.Path, out_dir: pathlib.Path, team_id: int) -> dict:
+XSPLIT_ID, XSPLIT_KEEP = 49, (2, 3)   # BC_XSPLIT builds (51 actions): k = len - 2, len - 3
+
+
+def split_ids(k: int, length: int) -> list[int]:
+    """Every codec id that splits off k segments from a dragon of this length: the fixed
+    sizes and half, then (in a 51-action build) the len-2 / len-3 ones."""
+    ids = [N_MOVES + i for i, kk in enumerate(SPLIT_K) if (kk if kk > 0 else length // 2) == k]
+    if bcsim.N_ACTIONS >= XSPLIT_ID + len(XSPLIT_KEEP):
+        ids += [XSPLIT_ID + j for j, keep in enumerate(XSPLIT_KEEP) if length - keep == k]
+    return ids
+
+
+MAP_DIRS = ["maps-server-1003", "maps-live", "maps-train-official", "maps-all", "maps", "maps-official"]
+_by_name: dict[str, list[str]] | None = None
+
+
+def _geometry(text: str) -> list[str]:
+    return [l for l in text.splitlines() if l.split()[:1] not in (["TILE"], ["MAP_NAME"], [])]
+
+
+def game_map(replay_map: str) -> str | None:
+    """The map to simulate a replay on. Server replays zero every TILE range (seen
+    2026-09-28), so the pearls come from our copy of the map with the same name and,
+    line for line, the same size, symmetry, edges and dragons. None if we have none."""
+    tiles = [l.split() for l in replay_map.splitlines() if l.startswith("TILE ")]
+    if any(t[3:5] != ["0", "0"] for t in tiles):
+        return replay_map                    # an older replay: the ranges are there
+    global _by_name
+    if _by_name is None:
+        _by_name = {}
+        root = pathlib.Path(__file__).resolve().parents[2]
+        for d in MAP_DIRS:
+            for f in sorted((root / d).glob("*.map")):
+                t = f.read_text()
+                name = next((l[9:].strip() for l in t.splitlines() if l.startswith("MAP_NAME ")), "")
+                _by_name.setdefault(name, []).append(t)
+    name = next((l[9:].strip() for l in replay_map.splitlines() if l.startswith("MAP_NAME ")), "")
+    geo = _geometry(replay_map)
+    for t in _by_name.get(name, []):
+        if _geometry(t) == geo:
+            return t
+    # Since 2026-09-28 the server plays variants of each map: the same terrain with
+    # the DRAGON lines changed (team labels swapped, which also changes who moves
+    # first in each pair; Prisoners Dilemma also with extra dragons). The pearl
+    # ranges are the map's own, so take the replay's dragons and our TILE lines.
+    terrain = [l for l in geo if not l.startswith("DRAGON")]
+    for t in _by_name.get(name, []):
+        if [l for l in _geometry(t) if not l.startswith("DRAGON")] == terrain:
+            ours = {l.split()[1] + " " + l.split()[2]: l for l in t.splitlines() if l.startswith("TILE ")}
+            return "\n".join(ours.get(l.split()[1] + " " + l.split()[2], l) if l.startswith("TILE ") else l
+                             for l in replay_map.splitlines()) + "\n"
+    return None
+
+
+def convert(game_json: pathlib.Path, out_dir: pathlib.Path, team_id: int, write: bool = True) -> dict:
     gid = int(game_json.stem)
     meta = json.loads(game_json.read_text())
     rp = read(game_json.with_suffix(".replay"))
     side = 0 if meta["teamAId"] == team_id else 1
-    row = {"game": gid, "side": side, "submission": meta["submissionAId" if side == 0 else "submissionBId"],
+    row = {"game": gid, "side": side, "submission": meta.get("submissionAId" if side == 0 else "submissionBId"),
            "opponent": meta["teamBId" if side == 0 else "teamAId"], "map": meta["mapId"],
            "winner_meta": meta["winner"], "winner_replay": rp.winner, "rounds": rp.rounds,
            "turns": len(rp.turns)}
 
-    env = bcsim.BattlecodeVecEnv([rp.map_text], num_envs=1, num_threads=1, seed=0,
+    map_text = game_map(rp.map_text)
+    if map_text is None:
+        row.update(samples=0, diverged="no copy of this map with its pearl ranges")
+        return row
+    env = bcsim.BattlecodeVecEnv([map_text], num_envs=1, num_threads=1, seed=0,
                                  random_pearl_seed=False, max_rounds=500)
+    if meta.get("seed"):                      # unswbc 1.1+: per-match pearls
+        env.set_pearl_seed64(0, int(meta["seed"], 16))
     obs = env.reset()
-    w, h = [int(v) for v in rp.map_text.split("\n", 1)[0].split()[1:3]]
+    w, h = [int(v) for v in map_text.split("\n", 1)[0].split()[1:3]]
 
     keep = {k: [] for k in ("local", "scalar", "msgs", "mask", "action", "alt",
                             "dragon", "round", "mask_ok")}
@@ -160,7 +219,7 @@ def convert(game_json: pathlib.Path, out_dir: pathlib.Path, team_id: int) -> dic
     n = len(keep["action"])
     row.update(samples=n, unrepresentable=unrepresentable, diverged=diverged,
                mask_violations=int(n - sum(keep["mask_ok"])) - unrepresentable)
-    if n:
+    if n and write:
         # the value target: did this team win the game (1 / 0 / 0.5 draw)
         won = 0.5 if rp.winner < 0 else float(rp.winner == side)
         np.savez_compressed(
@@ -170,7 +229,7 @@ def convert(game_json: pathlib.Path, out_dir: pathlib.Path, team_id: int) -> dic
             action=np.array(keep["action"], np.int16), alt=np.array(keep["alt"], np.int16),
             dragon=np.array(keep["dragon"], np.int32), round=np.array(keep["round"], np.int16),
             mask_ok=np.array(keep["mask_ok"], bool), won=np.float32(won),
-            game=np.int32(gid), submission=np.int32(row["submission"]))
+            game=np.int32(gid), submission=np.int32(row["submission"] if row["submission"] is not None else -1))
     return row
 
 
@@ -188,6 +247,9 @@ def main() -> None:
     p.add_argument("--workers", type=int, default=12)
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--redo", action="store_true", help="convert every game again")
+    p.add_argument("--index-only", action="store_true",
+                   help="only check the games (index.jsonl), no .npz: clone_lstm re-renders every turn "
+                        "with our sonar and reads nothing else")
     a = p.parse_args()
     root = pathlib.Path(a.games)
     out = root / "dataset"
@@ -202,12 +264,12 @@ def main() -> None:
     if idx_path.exists() and not a.redo:
         old = {r["game"]: r for r in map(json.loads, idx_path.read_text().splitlines())}
         clean = {g for g, r in old.items() if not r.get("error") and not r.get("diverged")
-                 and (r.get("samples", 0) == 0 or (out / f"{g}.npz").exists())}
+                 and (a.index_only or r.get("samples", 0) == 0 or (out / f"{g}.npz").exists())}
         rows = [old[g] for g in clean]
         jobs = [j for j in jobs if int(j.stem) not in clean]
         print(f"{len(clean)} games already converted, {len(jobs)} to go", flush=True)
     with mp.Pool(a.workers) as pool:
-        for r in pool.imap_unordered(_job, [(g, out, a.team_id) for g in jobs]):
+        for r in pool.imap_unordered(_job, [(g, out, a.team_id, not a.index_only) for g in jobs]):
             rows.append(r)
             flag = r.get("error") or r.get("diverged") or ""
             print(f"game {r['game']}: {r.get('samples', 0)} samples"
