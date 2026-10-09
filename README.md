@@ -1,68 +1,98 @@
 # BattleCode
 
-PPO self-play for UNSW Battlecode 2026 ("dragons"), trained against a fast C++
-simulator and shipped as a C++ bot with the weights compiled in.
+A PPO self-play bot for UNSW Battlecode 2026 ("dragons"). It was trained from random weights in a fast C++
+copy of the game engine (about 13.5B dragon-turns) and shipped as a C++ bot with its weights compiled in.
+
+## How it was trained
+
+### Ratchet: training in gated generations
+
+Plain PPO kept finding gains and then losing them, so training runs as a **ratchet**:
+
+- The learner trains in segments of 250–500M turns. After each segment it plays a **gate** of greedy
+  games against the current anchor and the four newest past versions. Gate maps are held out from training.
+- **Promote** if it scores ≥ 0.6 against every one of them. It becomes the next generation, joins the
+  opponent pool and becomes the new KL teacher.
+- **Extend** otherwise: it keeps training from its own weights and is never thrown away.
+  A candidate that regresses against an old version can't be promoted, even with a good score against the anchor.
+- Opponents in training are mostly self-play plus past generations. A past version the learner already
+  beats 95% of the time leaves training but stays in the gate.
+
+Version 0 is a uniformly random player. Twelve generations were promoted, and every promotion was
+submitted automatically.
+
+### KL leash and entropy
+
+- **KL(teacher ‖ student)** to the last promoted version. It is off until the first promotion,
+  because there is no point leashing the learner to the random player.
+  Tuning it took several restarts: 0.15 froze learning, 0.005 drifted, 0.1 worked early, and 0.025
+  was used for most of the run. Late on it was frozen at **0.01**. A gradient probe showed the KL pull
+  and PPO's steady push roughly cancel each other, so the leash was loosened, not removed.
+  A segment is aborted if KL goes above 0.5.
+- **Entropy** bonus 0.015 → 0 over 6B turns, later reset to 0.005 → 0. It is weighted by sampling
+  temperature like the policy loss. Without that weighting, cold rows got up to 4× the bonus and entropy
+  stopped falling.
+- The policy is **temperature-conditioned**. In training it samples at T ~ U[0.1, top], with top
+  0.5 → 0.35, and the gate plays greedy.
+
+### Reward: team potential first, then pure win/loss
+
+Earlier attempts each failed in a different way:
+
+- **Per-dragon rewards** (v1–v7) taught shredding and kamikaze runs.
+- **Pure win/loss from the start** was too sparse: the critic memorised games and collapsed.
+- **Cloning the top teams** and fine-tuning the clones with PPO either stalled or got worse.
+  Distilling the top three teams' replays into the PPO policy only helped on one map.
+
+What worked was a curriculum from a dense team reward to the sparse result:
+
+1. **Team potential Φ (reward v8).** One bounded, zero-sum potential per team with **no per-dragon terms**:
+   win condition, total length, top-3 length, a finisher term and board coverage. The weights are
+   time-varying, so the win condition is ~10% of Φ early and ~90% by round 500. Dragons compete for
+   ground, never for reward. The reward is potential-based shaping (ΔΦ), so it cannot be gamed.
+2. **A win/loss critic head** trained alongside Φ: undiscounted, TD(λ = 0.98 per round), target ±1.
+   At first it only learned and never steered. Its AUC was tracked against Φ's at rounds 25/100/200/350.
+3. **Sparse is blended in slowly.** The policy's advantage is
+   `A = (1 − b)·std(A_Φ) + b·std(A_WL)`, with b ramped **0 → 1 over 1.2B turns**.
+   Each part is standardised separately, so neither scale wins by default.
+   The final ~6B turns trained on **win/loss only**.
+
+The critic is separate from the policy. It sees the **true board**: a wrapped 27×27 crop on the toroidal
+map plus a pooled view of the whole board. It also knows which opponent it is playing (each past
+generation has its own identity slot) and both teams' temperatures. It never reads policy features.
+
+### Supervised "perfect play" mix
+
+After every gate, a short supervised pass pushes the policy toward moves that are provably right. The
+positions are **generated on fresh random maps**, never taken from the training maps, so the lesson has
+to generalise rather than be memorised:
+
+- kill the enemy queen when it is in reach, including with far sprints
+- self-kill a queen that is trapped
+- keep a walled-in enemy queen shut in
+- eat an adjacent pearl
+- late-game suicide when it decides the tiebreak
+- never dive the queen into a dead end she can see
+
+Ordinary self-play turns are mixed in under a KL penalty. The pass stops itself once it moves the policy
+by KL 0.02, so it nudges rather than overwrites. It was switched off for the final endgame segments.
+The dead-end rule is also a hard action mask in the shipped bot.
+
+### Maps
+
+70% of games are on ~4,000 generated maps (a port of the loong map generator, checked for symmetry and
+verified turn by turn against the real engine). The other 30% are on the official maps, including the
+server's hidden variants and pearl layouts reconstructed from replays.
+
+## Layout
 
 | Path | What |
 |---|---|
-| `bcsim/cpp/` | The simulator (`bc_core.hpp`), observations, vectorised env, scripted yardstick bots |
-| `bcsim/bcsim/` | Python ctypes wrapper (`BattlecodeVecEnv`); `make -C bcsim` builds the `.so` files here |
-| `bcsim/train/` | `train.py` (PPO), `yardstick.py` (eval worker), `dash.py` (dashboard), `augment.py` (map variants), `export_cpp.py` |
-| `bcsim/tests/` | Parity tests against the real engine, reward tests |
-| `maps/` | **The training pool: every map we have, all active** (12 as of 2026-09-23, retired ones included) |
-| `maps-live/` | The server's current rotation, straight from `GET /api/v1/maps` (7 maps as of 2026-09-23). Grade on these |
-| `maps-official/` | The official maps as downloaded, current and retired |
-| `runs/anchors/`, `runs/submitted/` | Frozen opponents the yardstick always plays (committed); everything else in `runs/` is ignored |
-| `mybot/` | The C++ submission. `weights_data.hpp` is generated, not committed |
-| `wasmprobe/` | Judge-cost metering, parity checks, `check_bot.sh`, `submit.sh` |
-| `archive/` | Old probes and Python bots, kept for reference |
-| `runs/replays/` | Scraped games of the top teams (datasets are rebuilt, see `DISTILL.md`) |
+| `bcsim/cpp/` | C++ simulator, observations, reward, sonar |
+| `bcsim/train/` | `ratchet.py` (gates and promotion), `ratchet_ff_train.py` (PPO segment), `perfect_play.py` (SL pass) |
+| `lstmbot/` | The C++ submission (`wasmprobe/submit_lstm.sh` builds, checks parity and uploads) |
+| `runs/submitted/` | Every submitted checkpoint |
+| `maps-*` | Training, gate and server map sets |
 
-**Distillation on another machine: see `DISTILL.md`.** Current RL state: `HANDOFF.md`.
-Cloning dev test with remembered features and labelled tactics: `DISTILL_DEVTEST.md`.
-
-## Setup (new machine)
-
-Needs `uv`, `g++` and an NVIDIA driver.
-
-```bash
-git clone <repo> BattleCode && cd BattleCode
-scripts/setup.sh        # .venv-train (torch cu128 + numpy), builds the simulator, smoke test
-```
-
-For an older GPU/driver, pick another wheel index:
-`TORCH_INDEX=https://download.pytorch.org/whl/cu126 scripts/setup.sh`.
-
-## Running a training run
-
-```bash
-scripts/launch.sh v5_lr1e-4 --width 64 --blocks 4 --envs 1024 --steps 256 \
-    --minibatch 8192 --compile --iters 200000 --reward v4 --lr 1e-4
-```
-
-That starts `train.train` and `train.yardstick` in the background, writing to
-`runs/<name>/`. Set `DASH_PORT=8770` to start the dashboard too; the URL, including its
-access token, goes to `runs/dash.log`. See `python -m train.train -h` (from `bcsim/`)
-for every flag. The ones worth sweeping are `--lr`, `--ent`/`--ent-end`/`--ent-half-life`,
-`--gamma`, `--lam`, `--clip`, `--epochs`, `--minibatch`, `--reward`, `--size-alpha`
-and `--aug-per-map`.
-
-- **Width 64 × 4 blocks is the largest net that fits the judge's CPU budget.**
-  Anything bigger can't be submitted as it stands (see `SUBMITTING.md`).
-- `--threads` (default 16) is the simulator's thread count, so set it to the
-  machine's core count.
-- Resume: rerun the same command with `--resume runs/<name>/latest.pt`.
-- Bring results back by copying `runs/<name>/` (`log.jsonl`, `eval.jsonl`,
-  `snapshots/`) to this machine.
-
-The reward versions (`v1`–`v4`) are defined at the top of `bcsim/train/train.py`.
-
-## Rebuilding the simulator
-
-`make -C bcsim`. It builds to a temp file and moves it into place, so it's safe while
-a run is live. Never write over `libbcvec.so` in place: a running process has it mmapped.
-
-## Submitting
-
-C++ only. Use `wasmprobe/submit.sh <ckpt> "description"`. See `SUBMITTING.md` and
-`KNOWN_ISSUES.md`.
+Setup: `scripts/setup.sh` (needs `uv`, `g++` and an NVIDIA driver). Reward details are in `REWARDS.md`,
+submission details in `SUBMITTING.md`.
