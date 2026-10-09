@@ -46,16 +46,44 @@ Earlier attempts each failed in a different way:
 
 What worked was a curriculum from a dense team reward to the sparse result:
 
-1. **Team potential Φ (reward v8).** One bounded, zero-sum potential per team with **no per-dragon terms**:
-   win condition, total length, top-3 length, a finisher term and board coverage. The weights are
-   time-varying, so the win condition is ~10% of Φ early and ~90% by round 500. Dragons compete for
-   ground, never for reward. The reward is potential-based shaping (ΔΦ), so it cannot be gamed.
+1. **Team potential Φ (reward v8).** One bounded, zero-sum potential per team with **no per-dragon terms**
+   (see the table below). Dragons compete for ground, never for reward. The reward is potential-based
+   shaping (ΔΦ), so it cannot be gamed.
 2. **A win/loss critic head** trained alongside Φ: undiscounted, TD(λ = 0.98 per round), target ±1.
    At first it only learned and never steered. Its AUC was tracked against Φ's at rounds 25/100/200/350.
 3. **Sparse is blended in slowly.** The policy's advantage is
    `A = (1 − b)·std(A_Φ) + b·std(A_WL)`, with b ramped **0 → 1 over 1.2B turns**.
    Each part is standardised separately, so neither scale wins by default.
    The final ~6B turns trained on **win/loss only**.
+
+#### The Φ terms
+
+Φ = Σ λᵢ(t)·Φᵢ / Σ λᵢ(t), with κ = 1, so |Φ| ≤ 1. s = round / 500. Each term is computed from our
+team's side minus the enemy's side, so swapping the teams flips Φ's sign exactly. `nd(a, b)` = 2(a − b)/(a + b).
+
+| Term | Φᵢ (each in [−1, 1]) | Weight λᵢ(t) | How the weight decays |
+|---|---|---|---|
+| **WIN** | The round-500 verdict in its own order: tanh(nd(queen) + g·tanh(nd(longest) + g·tanh(nd(total))))<br>Each inner tiebreak is scaled by g so it can never outvote the level above | 1.5·s² | 0 at the start, grows quadratically, 1.5 at round 500 |
+| **LEN** | tanh(nd(total length)) | 1 − s | Linear 1 → 0 |
+| **QUEEN** | Our living queens − theirs | min(1, (500 − round)/125) | Flat 1 until round 375, then linear to 0, so a late queen kill isn't paid twice |
+| **KILL** | e^(−their total/15) − e^(−our total/15): how close each team is to being wiped out | 0.8·(1 − s³) | 0.8, holds, then drops off late |
+| **EXP** | tanh(0.005·(our tiles explored − theirs)) | (1 − map known)·clamp((75 − round)/50) | Opening only: gone by round 75, and sooner on small maps |
+
+Each term's share of Φ by round. EXP assumes about 30% of the map is explored, so its exact share varies by map:
+
+| Round | WIN | LEN | QUEEN | KILL | EXP |
+|---|---|---|---|---|---|
+| 0 | 0% | 29% | 29% | 23% | 20% |
+| 50 | 0% | 29% | 33% | 26% | 11% |
+| 100 | 2% | 30% | 38% | 30% | 0% |
+| 250 | 15% | 19% | 39% | 27% | 0% |
+| 375 | 33% | 10% | 39% | 18% | 0% |
+| 450 | 63% | 5% | 21% | 11% | 0% |
+| 500 | 100% | 0% | 0% | 0% | 0% |
+
+So Φ rewards material and safety early and turns into the actual verdict by the end. A single ΔΦ is paid
+to the whole team, and the critic's horizon is short (discount 0.8 per round, about 5 rounds).
+Lengths are conserved by a split, so splitting is never paid for its own sake.
 
 The critic is separate from the policy. It sees the **true board**: a wrapped 27×27 crop on the toroidal
 map plus a pooled view of the whole board. It also knows which opponent it is playing (each past
